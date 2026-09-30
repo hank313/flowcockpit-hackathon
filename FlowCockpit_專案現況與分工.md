@@ -187,12 +187,58 @@ Android 端的工作量其實最大(3類元件的視覺呈現、輸入互動、�
 
 在各自開始寫程式前,建議先花時間一起定義好:
 
-1. **JSON UI 描述格式**:例如 `{"component": "candidate_card", "data": {...}}` 這種結構,每個欄位叫什麼名字、必填/選填(A1、D 要對齊)
-2. **條件 JSON 格式**:BC 輸出給 D 的篩選條件長什麼樣子,例如 `{"indoor": true, "seating": true, "distance": "near"}`(BC、D 要對齊)
-3. **task_id / version 規則**:誰產生 task_id、version 什麼時候遞增、誰負責比對新舊(D、A2、E 都要用到)
-4. **WebSocket 訊息包格式**:每一則訊息的外層結構(例如都包一層 `{"task_id":..., "version":..., "payload":{...}}`)(A2、D 要對齊)
+以下是已經定案的介面格式(A1、A2、BC、D 開發時請直接照這個做,不要再各自發明)。E 的雲端增強功能因為由同一人負責整合,格式不在此強制規範,實際串接時再彈性調整。
 
-這幾個格式一旦先講好,五個人就可以各自平行開發,不用互相等待。
+### BC → D:意圖抽取後的條件
+
+```json
+{
+  "intent": "search_rest_stop",
+  "conditions": {
+    "indoor": true,
+    "has_seating": true,
+    "max_walk_distance_m": 300
+  },
+  "reference": { "type": "modify", "target_candidate_id": "loc_002" },
+  "raw_text": "找個室內、有座位、不用走太遠的地方"
+}
+```
+
+`reference` 為選填欄位,用於「留下第二個」這類指涉性修改,指向要操作的候選ID。
+
+### D → A1:生成式UI描述(渲染依據)
+
+```json
+{
+  "components": [
+    { "type": "condition_control", "id": "cond_1",
+      "data": { "filters": { "indoor": true, "has_seating": true, "max_walk_distance_m": 300 } } },
+    { "type": "candidate_card", "id": "card_loc_002",
+      "data": { "candidate_id": "loc_002", "name": "示範地點A", "attributes": { "indoor": true, "walk_distance_m": 180 }, "selected": false } },
+    { "type": "compare_confirm_panel", "id": "panel_1",
+      "data": { "candidate_ids": ["loc_001", "loc_002"], "comparison_text": null, "confirm_enabled": true } }
+  ],
+  "clarification_needed": null
+}
+```
+
+`components` 是陣列,每個元素的 `type` 只會是 `condition_control` / `candidate_card` / `compare_confirm_panel` 三種固定值之一,A1 依 `type` 決定渲染哪個 Composable。`clarification_needed` 有值(字串問句)時,代表AI無法理解需求,A1要改顯示澄清問題UI。
+
+### WebSocket 外層包裝(A2 ↔ D 雙向都用這個格式)
+
+```json
+{
+  "task_id": "task_20261001_0001",
+  "version": 4,
+  "type": "ui_update",
+  "payload": { }
+}
+```
+
+- `type` 可能的值:`"ui_update"`(D→A2,payload是上面D→A1那份UI描述)、`"user_action"`(A2→D,payload例如 `{"action":"select_candidate","candidate_id":"loc_002"}`)、`"voice_input"`(A2→D,語音輸入事件)
+- `version` 由 D 在任務狀態每次變動時遞增;任何一方收到訊息時要比對版本,**版本較舊的訊息一律丟棄**,避免覆蓋掉使用者最新的操作
+
+這幾個格式已經定案,A1、A2、BC、D 可以直接照這個平行開發,不用再互相等待討論。
 
 ---
 

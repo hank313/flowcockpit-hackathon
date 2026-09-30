@@ -50,16 +50,45 @@ Android HMI App  ←Ethernet/WebSocket→  AI Box(Python)  ←(連網時)→  Cl
 
 ---
 
-## 共用規範(所有人先對齊)
+## 共用規範(A1、A2、BC、D 請直接照這個做)
 
-在各自開始寫程式前,先在這裡定案下面幾個格式,避免各做各的:
+E 的雲端增強功能由同一人負責整合,格式不在此強制規範。
 
-1. **JSON UI 描述格式**(例如 `{"component": "candidate_card", "data": {...}}`)
-2. **條件 JSON 格式**(例如 `{"indoor": true, "seating": true, "distance": "near"}`)
-3. **task_id / version 規則**
-4. **WebSocket 訊息包格式**(例如外層都包 `{"task_id":..., "version":..., "payload":{...}}`)
+### BC → D:意圖抽取後的條件
 
-> 待補:上面四項的實際定案內容,由 A1/A2/BC/D 討論後填在這裡。
+```json
+{
+  "intent": "search_rest_stop",
+  "conditions": { "indoor": true, "has_seating": true, "max_walk_distance_m": 300 },
+  "reference": { "type": "modify", "target_candidate_id": "loc_002" },
+  "raw_text": "找個室內、有座位、不用走太遠的地方"
+}
+```
+
+`reference` 選填,用於「留下第二個」這類指涉性修改。
+
+### D → A1:生成式UI描述(渲染依據)
+
+```json
+{
+  "components": [
+    { "type": "condition_control", "id": "cond_1", "data": { "filters": { "indoor": true } } },
+    { "type": "candidate_card", "id": "card_loc_002", "data": { "candidate_id": "loc_002", "name": "示範地點A", "attributes": {}, "selected": false } },
+    { "type": "compare_confirm_panel", "id": "panel_1", "data": { "candidate_ids": ["loc_001", "loc_002"], "comparison_text": null, "confirm_enabled": true } }
+  ],
+  "clarification_needed": null
+}
+```
+
+`type` 只會是 `condition_control` / `candidate_card` / `compare_confirm_panel` 三種固定值。`clarification_needed` 有值時代表AI聽不懂,顯示澄清問題UI。
+
+### WebSocket 外層包裝(A2 ↔ D)
+
+```json
+{ "task_id": "task_20261001_0001", "version": 4, "type": "ui_update", "payload": {} }
+```
+
+`type`:`ui_update`(D→A2)、`user_action`(A2→D)、`voice_input`(A2→D)。`version` 由 D 遞增,收到較舊版本一律丟棄。
 
 ---
 
