@@ -5,10 +5,12 @@ E 模組:雲端增強功能(多條件比較)
 """
 
 import os
+from pathlib import Path
 from dotenv import load_dotenv
 from anthropic import Anthropic, APIConnectionError, APITimeoutError
 
-load_dotenv()
+# .env 放在專案根目錄(e/ 的上一層),不管從哪個資料夾執行這支程式都能找到
+load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
 _client = Anthropic()
 
