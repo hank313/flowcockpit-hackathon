@@ -16,6 +16,7 @@ from fastapi import FastAPI, File, Form, UploadFile
 from fastapi.responses import JSONResponse, RedirectResponse
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 import places
+from bc_intent import BCIntent, CandidateContext, extract as extract_bc
 from search_scope import resolve_scope, without_scope
 from opencc import OpenCC
 
@@ -94,7 +95,7 @@ class SearchIntent(BaseModel):
     outside_yunlin: bool
 
 
-class TextRequest(BaseModel):
+class TextRequest(CandidateContext):
     model_config = ConfigDict(extra='forbid')
     text: str = Field(min_length=1, max_length=6000)
     instruction: str = Field(default=DEFAULT_INSTRUCTION, min_length=1, max_length=2000)
@@ -115,6 +116,7 @@ class TextRequest(BaseModel):
 class PlaceReply(BaseModel):
     places: list[dict]
     reply: str
+    bc_to_d: BCIntent
 
 
 def interpret_query(text):
@@ -139,14 +141,35 @@ def interpret_query(text):
     }, SearchIntent)
 
 
-def respond(text, instruction=DEFAULT_INSTRUCTION, latitude=None, longitude=None, limit=5, radius_km=None):
+def respond(text, instruction=DEFAULT_INSTRUCTION, latitude=None, longitude=None, limit=5, radius_km=None, context=None):
+    try:
+        resolve_scope(traditional.convert(text),traditional.convert(instruction),latitude,longitude,radius_km)
+    except ValueError as exc:
+        raise PipelineError('invalid_search_scope',str(exc)) from exc
+    parsed = interpret_query(without_scope(traditional.convert(text)))
+    bc, clarification = extract_bc(text,parsed.action,parsed.category,context)
+    if clarification:
+        result = {'places':[], 'reply':clarification}
+    elif bc.reference:
+        result = {'places':[], 'reply':'已抽取指定候選的操作與條件，交由 D 模組處理；此服務未修改任務狀態。'}
+    elif bc.conditions.model_dump(exclude_none=True):
+        # BC emits constraints. D owns state and constraint evaluation; never claim
+        # that straight-line OSM distances are driving distances.
+        result = {'places':[], 'reply':'已抽取搜尋條件，交由 D 模組篩選地點。室內、座位與實際行駛距離尚未由此服務驗證。'}
+    else:
+        result = respond_places(text,instruction,latitude,longitude,limit,radius_km,parsed)
+    result['bc_to_d'] = bc.model_dump(exclude_none=True)
+    return result
+
+
+def respond_places(text, instruction=DEFAULT_INSTRUCTION, latitude=None, longitude=None, limit=5, radius_km=None, parsed=None):
     text = traditional.convert(text)
     try:
         latitude,longitude,radius_km = resolve_scope(text,traditional.convert(instruction),latitude,longitude,radius_km)
     except ValueError as exc:
         raise PipelineError('invalid_search_scope',str(exc)) from exc
     text = without_scope(text)
-    intent = interpret_query(text)
+    intent = parsed or interpret_query(text)
     normalized = text.replace('台','臺')
     district = next((town for town in places.TOWNS if town[:-1] in normalized), '')
     other_regions = ('臺北','新北','桃園','臺中','臺南','高雄','基隆','新竹','苗栗','彰化','南投','嘉義','屏東','宜蘭','花蓮','臺東','澎湖','金門','連江')
@@ -189,7 +212,7 @@ def respond(text, instruction=DEFAULT_INSTRUCTION, latitude=None, longitude=None
 
 
 def process_audio(path, language="auto", instruction=DEFAULT_INSTRUCTION,
-                  latitude=None, longitude=None, limit=5, radius_km=None):
+                  latitude=None, longitude=None, limit=5, radius_km=None, context=None):
     global whisper
     if not instruction.strip() or len(instruction) > 2000:
         raise PipelineError("invalid_instruction", "任務指令需為 1–2000 字。")
@@ -248,7 +271,7 @@ def process_audio(path, language="auto", instruction=DEFAULT_INSTRUCTION,
             raise PipelineError("no_speech", "未辨識到語音，請提供有清楚人聲的音訊。")
         if len(transcript) > 6000:
             raise PipelineError("transcript_too_long", "辨識文字超過 6000 字，請分段提交音訊。", 413)
-        return respond(transcript,instruction,latitude,longitude,limit,radius_km)
+        return respond(transcript,instruction,latitude,longitude,limit,radius_km,context)
     except PipelineError:
         raise
     except (av.error.FFmpegError, ValueError, EOFError) as exc:
@@ -261,7 +284,7 @@ def error_json(exc):
     return {"ok": False, "error": {"code": exc.code, "message": exc.message}}
 
 
-app = FastAPI(title="雲林離線地點搜尋", description="音訊或文字 → 本機 llama3.2:1b → 雲林 SQLite。成功回應固定分為 places（地點）及 reply（回覆）。地圖資料 © OpenStreetMap contributors，ODbL 1.0；資料日期見 /api/places/info。")
+app = FastAPI(title="雲林離線地點搜尋", description="音訊或文字 → 本機 llama3.2:1b → 雲林 SQLite。回應包含 places（地點）、reply（回覆）與 bc_to_d（意圖條件）。地圖資料 © OpenStreetMap contributors，ODbL 1.0；資料日期見 /api/places/info。")
 
 
 @app.exception_handler(PipelineError)
@@ -274,10 +297,20 @@ def index():
     return RedirectResponse("/docs")
 
 
-@app.post('/api/text', response_model=PlaceReply)
+@app.post('/api/intent', response_model=BCIntent, response_model_exclude_none=True)
+def intent_endpoint(request: TextRequest):
+    """只回傳 BC → D 合約，不查詢地圖或修改 D 的任務狀態。"""
+    parsed = interpret_query(traditional.convert(request.text))
+    result, clarification = extract_bc(request.text,parsed.action,parsed.category,request)
+    if clarification:
+        raise PipelineError('clarification_needed',clarification)
+    return result
+
+
+@app.post('/api/text', response_model=PlaceReply, response_model_exclude_none=True)
 def text_endpoint(request: TextRequest):
     """輸入「找一個休息地點」。座標選填；未提供時不宣稱最近。"""
-    return respond(request.text,request.instruction,request.latitude,request.longitude,request.limit,request.radius_km)
+    return respond(request.text,request.instruction,request.latitude,request.longitude,request.limit,request.radius_km,request)
 
 
 @app.get('/api/places/info')
@@ -289,15 +322,20 @@ def places_info():
         raise PipelineError('places_unavailable','本機地點資料庫無法讀取。',503) from exc
 
 
-@app.post("/api/audio", response_model=PlaceReply)
+@app.post("/api/audio", response_model=PlaceReply, response_model_exclude_none=True)
 def audio_endpoint(file: UploadFile = File(...), language: str = Form("auto"),
                    instruction: str = Form(DEFAULT_INSTRUCTION),
                    latitude: float | None = Form(None, ge=-90,le=90),
                    longitude: float | None = Form(None, ge=-180,le=180),
                    radius_km: float | None = Form(None,gt=0,allow_inf_nan=False,description='搜尋半徑（公里），例如 5；也可寫在 instruction 中'),
-                   limit: int = Form(5,ge=1,le=20)):
+                   limit: int = Form(5,ge=1,le=20),
+                   context_json: str = Form('{}',max_length=10000,description='上位機的 JSON：reference_type、candidate_ids；或完整 reference；可設定 short_drive_distance_m')):
     """展開後按 Try it out → 選擇檔案 → Execute。首次執行會下載 Whisper。"""
     try:
+        try:
+            context = CandidateContext.model_validate_json(context_json)
+        except ValidationError as exc:
+            raise PipelineError('invalid_context','context_json 格式錯誤，請檢查 reference.type 與候選清單。') from exc
         if (latitude is None) != (longitude is None):
             raise PipelineError('invalid_coordinates','latitude 和 longitude 必須一起提供。')
         with tempfile.TemporaryDirectory(prefix="ollama-audio-") as directory:
@@ -309,7 +347,7 @@ def audio_endpoint(file: UploadFile = File(...), language: str = Form("auto"),
                     if size > MAX_BYTES:
                         raise PipelineError("file_too_large", "檔案上限為 25 MiB。", 413)
                     output.write(chunk)
-            return process_audio(path, language, instruction,latitude,longitude,limit,radius_km)
+            return process_audio(path, language, instruction,latitude,longitude,limit,radius_km,context)
     except PipelineError:
         raise
     except Exception as exc:
@@ -331,6 +369,7 @@ def main():
     parser.add_argument('--longitude',type=float)
     parser.add_argument('--radius-km',type=float)
     parser.add_argument('--limit',type=int,default=5)
+    parser.add_argument('--context-json',default='{}',help='上位機提供的 reference/candidate_ids JSON')
     args = parser.parse_args()
     if args.serve:
         import uvicorn
@@ -339,12 +378,13 @@ def main():
     if not args.audio and not args.text:
         parser.error("請指定音訊檔案、--text 或 --serve")
     try:
-        request = TextRequest(text=args.text or 'audio',instruction=args.instruction,latitude=args.latitude,longitude=args.longitude,limit=args.limit,radius_km=args.radius_km)
+        context = CandidateContext.model_validate_json(args.context_json)
+        request = TextRequest(**context.model_dump(),text=args.text or 'audio',instruction=args.instruction,latitude=args.latitude,longitude=args.longitude,limit=args.limit,radius_km=args.radius_km)
     except ValidationError as exc:
         parser.error(str(exc))
     try:
-        result = (respond(args.text,args.instruction,request.latitude,request.longitude,request.limit,request.radius_km) if args.text
-                  else process_audio(args.audio,args.language,args.instruction,request.latitude,request.longitude,request.limit,request.radius_km))
+        result = (respond(args.text,args.instruction,request.latitude,request.longitude,request.limit,request.radius_km,request) if args.text
+                  else process_audio(args.audio,args.language,args.instruction,request.latitude,request.longitude,request.limit,request.radius_km,request))
         print(json.dumps(result,ensure_ascii=False,indent=2))
     except PipelineError as exc:
         print(json.dumps(error_json(exc), ensure_ascii=False, indent=2))
