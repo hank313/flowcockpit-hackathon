@@ -5,6 +5,7 @@ import time
 from typing import Any, Dict, List, Optional
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 import uvicorn
+from fastapi.responses import HTMLResponse
 
 DB_PATH = "flowcockpit.db"
 
@@ -290,6 +291,11 @@ class ConnectionManager:
             await connection.send_text(text_data)
 
 manager = ConnectionManager()
+
+@app.get("/", response_class=HTMLResponse)
+async def get_demo_dashboard():
+    with open("dashboard.html", "r", encoding="utf-8") as f:
+        return f.read()
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
