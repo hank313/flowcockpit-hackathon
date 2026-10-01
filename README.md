@@ -34,6 +34,20 @@ Android HMI App  ←Ethernet/WebSocket→  AI Box(Python)  ←(連網時)→  Cl
 
 負責範圍:候選卡片、條件控制、比較與確認面板三類 Compose 元件,以及依 JSON 決定渲染哪個元件的渲染器。
 
+**進度**:三類元件、渲染器、澄清問題UI 已完成;目前用假後端 `FakeAiBox` 依下方定案格式送 `ui_update` 做開發與展示。
+
+**程式位置**(`A1/app/src/main/java/com/example/testapp/`):
+- `model/UiModels.kt`:JSON 對應的資料結構(`Envelope`、`UiComponent`、`UserAction`)
+- `model/UiJsonParser.kt`:容錯解析,欄位缺漏時顯示「未知」,未知的 `type` 略過不 crash
+- `data/AiBoxGateway.kt`:A1 與 AI Box 的介面,**A2 請以 WebSocket 實作此介面取代 `FakeAiBox`**
+- `data/FakeAiBox.kt`:假後端,可當完整 JSON 範例參考
+
+**A1 認得的條件/屬性 key**:見下方「D → A1」的欄位表
+
+**待對齊**:
+- 距離欄位:原共用規範用 `walk_distance_m` / `max_walk_distance_m`(步行),A1 改用 `drive_distance_m` / `max_drive_distance_m`(行駛),需 BC、D、E 配合
+- `update_condition`、`confirm` 的 payload 欄位(見下方 WebSocket 區塊)需與 D 確認
+
 ### A2 — Android 互動邏輯、狀態管理與多螢幕
 
 負責範圍:麥克風/觸控輸入事件、WebSocket client、行駛模式收合/展開動畫、中斷恢復邏輯。
@@ -74,8 +88,8 @@ E 的雲端增強功能由同一人負責整合,格式不在此強制規範。
 ```json
 {
   "components": [
-    { "type": "condition_control", "id": "cond_1", "data": { "filters": { "indoor": true } } },
-    { "type": "candidate_card", "id": "card_loc_002", "data": { "candidate_id": "loc_002", "name": "示範地點A", "attributes": {}, "selected": false } },
+    { "type": "condition_control", "id": "cond_1", "data": { "filters": { "indoor": true, "has_seating": true, "has_food": false, "max_drive_distance_m": 3000 } } },
+    { "type": "candidate_card", "id": "card_loc_002", "data": { "candidate_id": "loc_002", "name": "示範地點A", "attributes": { "indoor": true, "has_seating": true, "has_food": true, "drive_distance_m": 1800 }, "selected": false } },
     { "type": "compare_confirm_panel", "id": "panel_1", "data": { "candidate_ids": ["loc_001", "loc_002"], "comparison_text": null, "confirm_enabled": true } }
   ],
   "clarification_needed": null
@@ -84,6 +98,21 @@ E 的雲端增強功能由同一人負責整合,格式不在此強制規範。
 
 `type` 只會是 `condition_control` / `candidate_card` / `compare_confirm_panel` 三種固定值。`clarification_needed` 有值時代表AI聽不懂,顯示澄清問題UI。
 
+`filters` / `attributes` 可用的 key(依 A1 目前實作):
+
+| key | 型別 | 用在 | 說明 |
+|---|---|---|---|
+| `indoor` | bool | filters、attributes | 室內 |
+| `has_seating` | bool | filters、attributes | 有座位 |
+| `has_food` | bool | filters、attributes | 有餐飲(**新增**) |
+| `max_drive_distance_m` | int(公尺) | filters | 行駛距離上限(**新增**) |
+| `drive_distance_m` | int(公尺) | attributes | 行駛距離(**新增**) |
+| `drive_time_min` | int(分鐘) | attributes | 車程,選填(**新增**) |
+
+值為 `null` 時 A1 顯示「未知」;未列出的 key 仍可傳,A1 會直接顯示原字串。
+
+> **原本的共用規範**(`FlowCockpit_專案現況與分工.md`):`filters` 為 `{ "indoor": true, "has_seating": true, "max_walk_distance_m": 300 }`,`attributes` 為 `{ "indoor": true, "walk_distance_m": 180 }`,距離以**步行**計。A1 改用**行駛**距離並加入 `has_food`;BC 輸出的 `max_walk_distance_m` 與 E 的範例仍是舊欄位,需對齊。
+
 ### WebSocket 外層包裝(A2 ↔ D)
 
 ```json
@@ -91,6 +120,16 @@ E 的雲端增強功能由同一人負責整合,格式不在此強制規範。
 ```
 
 `type`:`ui_update`(D→A2)、`user_action`(A2→D)、`voice_input`(A2→D)。`version` 由 D 遞增,收到較舊版本一律丟棄。
+
+`user_action` 的 payload(A1 元件產生,由 A2 包裝送出):
+
+```json
+{ "action": "select_candidate", "candidate_id": "loc_002" }
+{ "action": "update_condition", "key": "has_food", "value": true }
+{ "action": "confirm", "candidate_id": "loc_002" }
+```
+
+`select_candidate` 已定案;`update_condition`、`confirm` 為 A1 目前的實作,尚待 D 確認。
 
 ---
 
