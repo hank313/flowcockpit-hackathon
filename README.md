@@ -54,7 +54,7 @@ Android HMI App  ←Ethernet/WebSocket→  AI Box(Python)  ←(連網時)→  Cl
 
 ### BC — 語音與本地AI
 
-負責範圍:faster-whisper 語音辨識、Ollama 跑 Qwen3-1.7B 做意圖/條件抽取(輸出結構化JSON)。
+負責範圍:faster-whisper 語音辨識、Ollama 跑 Llama-3.2-1B做意圖/條件抽取(輸出結構化JSON)。
 
 ### D — 任務狀態與後端
 
