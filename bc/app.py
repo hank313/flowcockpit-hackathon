@@ -92,7 +92,7 @@ class SearchIntent(BaseModel):
     action: Literal['search', 'chat']
     category: Literal['rest','park','cafe','food','toilet','convenience','fuel','medical','attraction','lodging','parking','water','all']
     place_name: str = Field(description="Specific place name explicitly in the input, otherwise empty string")
-    outside_yunlin: bool
+    outside_taiwan: bool
 
 
 class TextRequest(CandidateContext):
@@ -132,8 +132,8 @@ def interpret_query(text):
                 'parking=停車, water=飲用水, all=specific place name or other category. '
                 'place_name: copy a specific business or landmark name from the input, or empty string. '
                 'Do not put generic category words or township names in place_name. '
-                'outside_yunlin=true ONLY if the user explicitly requests a location outside Yunlin County, Taiwan. '
-                '斗六/斗南/虎尾/北港/西螺/古坑/麥寮 are all in Yunlin. '
+                'outside_taiwan=true ONLY if the user explicitly requests a location outside Taiwan (including Penghu, Kinmen and Lienchiang). '
+                'All Taiwan counties and cities are supported. '
                 'Examples: 找一個休息地點 -> search/rest/empty/false; 找廁所 -> search/toilet/empty/false; '
                 '你好 -> chat/all/empty/false. JSON schema: ' + json.dumps(schema,ensure_ascii=False))},
             {'role':'user','content':text},
@@ -171,19 +171,23 @@ def respond_places(text, instruction=DEFAULT_INSTRUCTION, latitude=None, longitu
     text = without_scope(text)
     intent = parsed or interpret_query(text)
     normalized = text.replace('台','臺')
-    district = next((town for town in places.TOWNS if town[:-1] in normalized), '')
-    other_regions = ('臺北','新北','桃園','臺中','臺南','高雄','基隆','新竹','苗栗','彰化','南投','嘉義','屏東','宜蘭','花蓮','臺東','澎湖','金門','連江')
-    outside = any(region in normalized for region in other_regions)
-    if (intent.outside_yunlin or outside) and not district and '雲林' not in text:
-        return {'places':[], 'reply':'目前只安裝雲林縣的離線地點資料，無法查詢其他縣市。'}
     if intent.action == 'chat':
         return {'places':[], 'reply':analyze_text(text,instruction).reply}
+    try:
+        counties, district, clarification = places.resolve_regions(normalized)
+    except (OSError, sqlite3.Error) as exc:
+        raise PipelineError('places_unavailable','本機臺灣地點資料庫尚未建立或無法讀取。',503) from exc
+    if clarification:
+        return {'places':[], 'reply':clarification}
+    if intent.outside_taiwan and not counties:
+        return {'places':[], 'reply':'目前安裝臺灣的離線地點資料，無法查詢國外地點。'}
     # Small models sometimes copy the whole request as place_name. Remove search
     # grammar/category words, while keeping unknown proper names (no false fallback).
     keyword = traditional.convert(intent.place_name.strip())
     if keyword and keyword not in text:
         keyword = ''
-    if keyword and (keyword.replace('台','臺') in district or keyword in {'雲林','雲林縣'}):
+    keyword = keyword.replace('台','臺')
+    if keyword and (keyword.replace('台','臺') in district or keyword.replace('台','臺') in {*counties, *(c[:-1] for c in counties), '臺灣'}):
         keyword = ''
     if keyword:
         keyword = re.sub(r'^(請問|請|幫我|替我|我想要|我想|我要|我|想要|想|找出|尋找|找|推薦|給我|一個|一間|一家|一處|附近|最近|有沒有|哪裡有|可以|能)+', '', keyword)
@@ -196,7 +200,7 @@ def respond_places(text, instruction=DEFAULT_INSTRUCTION, latitude=None, longitu
             'lodging': ('住宿','旅館','飯店'), 'parking': ('停車場','停車'),
             'water': ('飲水機','飲用水','飲水'), 'all': (),
         }
-        for word in (*generic[intent.category],district,district[:-1],'雲林縣','雲林','的地點','地點','地方'):
+        for word in (*generic[intent.category],district,district[:-1],*counties,*(c[:-1] for c in counties),'臺灣','台灣','的地點','地點','地方'):
             if word: keyword = keyword.replace(word,'')
         keyword = keyword.strip(' 的？?。，,.!！')
     try:
@@ -206,7 +210,7 @@ def respond_places(text, instruction=DEFAULT_INSTRUCTION, latitude=None, longitu
             intent.category = 'all'
         if intent.category == 'all' and not keyword:
             return {'places':[], 'reply':'請指定地點名稱或類別，例如「找休息地點」、「虎尾的咖啡店」或「找廁所」。'}
-        return places.answer(intent.category,keyword,district,latitude,longitude,limit,radius_km)
+        return places.answer(intent.category,keyword,district,latitude,longitude,limit,radius_km,counties)
     except (OSError, sqlite3.Error) as exc:
         raise PipelineError('places_unavailable','本機地點資料庫尚未建立或無法讀取。',503) from exc
 
@@ -284,7 +288,7 @@ def error_json(exc):
     return {"ok": False, "error": {"code": exc.code, "message": exc.message}}
 
 
-app = FastAPI(title="雲林離線地點搜尋", description="音訊或文字 → 本機 llama3.2:1b → 雲林 SQLite。回應包含 places（地點）、reply（回覆）與 bc_to_d（意圖條件）。地圖資料 © OpenStreetMap contributors，ODbL 1.0；資料日期見 /api/places/info。")
+app = FastAPI(title="臺灣離線地點搜尋", description="音訊或文字 → 本機 llama3.2:1b → 臺灣 SQLite。回應包含 places（地點）、reply（回覆）與 bc_to_d（意圖條件）。地圖資料 © OpenStreetMap contributors，ODbL 1.0；資料日期見 /api/places/info。")
 
 
 @app.exception_handler(PipelineError)

@@ -1,12 +1,12 @@
 """Read-only offline POI search. Coordinates and names always come from OSM."""
+from contextlib import closing
 import json
 import math
 from pathlib import Path
 import sqlite3
 
 DATA = Path(__file__).resolve().parent / 'data'
-DB_PATH = DATA / 'yunlin.sqlite3'
-TOWNS = ['斗六市','斗南鎮','虎尾鎮','西螺鎮','土庫鎮','北港鎮','古坑鄉','大埤鄉','莿桐鄉','林內鄉','二崙鄉','崙背鄉','麥寮鄉','東勢鄉','褒忠鄉','臺西鄉','元長鄉','四湖鄉','口湖鄉','水林鄉']
+DB_PATH = DATA / 'taiwan.sqlite3'
 LABELS = {'rest':'休息設施','park':'公園','cafe':'咖啡店','food':'餐飲','toilet':'廁所','convenience':'便利商店','fuel':'加油站','medical':'醫療','attraction':'景點','lodging':'住宿','parking':'停車場','water':'飲水設施','all':'地點'}
 
 
@@ -29,14 +29,38 @@ def categories(tags):
 
 
 def metadata():
-    with sqlite3.connect(f'{DB_PATH.as_uri()}?mode=ro', uri=True) as db:
+    with closing(sqlite3.connect(f'{DB_PATH.as_uri()}?mode=ro', uri=True)) as db:
         return json.loads(db.execute('SELECT value FROM metadata WHERE key=?', ('snapshot',)).fetchone()[0])
+
+
+def resolve_regions(text):
+    """Resolve local administrative names, refusing ambiguous districts."""
+    text = text.replace('台', '臺')
+    with closing(sqlite3.connect(f'{DB_PATH.as_uri()}?mode=ro', uri=True)) as db:
+        areas = db.execute('SELECT county,district FROM administrative_areas').fetchall()
+    counties = sorted({c for c, _ in areas})
+    selected = [c for c in counties if c in text]
+    if not selected:
+        selected = [c for c in counties if c[:-1] in text]
+    # Remove counties before matching district aliases (e.g. 新竹 vs 新竹縣).
+    remaining = text
+    for c in selected:
+        remaining = remaining.replace(c, '').replace(c[:-1], '')
+    available = [(c,d) for c,d in areas if not selected or c in selected]
+    matched = [(c,d) for c,d in available if d and d in remaining]
+    if not matched:
+        matched = [(c,d) for c,d in available if len(d[:-1]) >= 2 and d[:-1] in remaining]
+    if len(matched) > 1:
+        return selected, '', '請指定完整縣市與行政區，以區分：' + '、'.join(c+d for c,d in matched) + '。'
+    if matched:
+        return [matched[0][0]], matched[0][1], ''
+    return selected, '', ''
 
 
 def explicit_name(text):
     """Find the longest actual OSM name mentioned verbatim by the user."""
     normalized = text.casefold().replace('台','臺')
-    with sqlite3.connect(f'{DB_PATH.as_uri()}?mode=ro', uri=True) as db:
+    with closing(sqlite3.connect(f'{DB_PATH.as_uri()}?mode=ro', uri=True)) as db:
         names = db.execute('SELECT DISTINCT name FROM places WHERE named=1').fetchall()
     matches = [name for (name,) in names if len(name) >= 3 and name.casefold().replace('台','臺') in normalized]
     return max(matches,key=len) if matches else ''
@@ -48,7 +72,7 @@ def distance_m(lat, lon, plat, plon):
     return 6371000 * 2 * math.asin(math.sqrt(min(1,h)))
 
 
-def search(category='all', keyword='', district='', latitude=None, longitude=None, limit=5, radius_km=None):
+def search(category='all', keyword='', district='', latitude=None, longitude=None, limit=5, radius_km=None, counties=None):
     from search_scope import resolve_scope
     latitude,longitude,radius_km = resolve_scope('', '',latitude,longitude,radius_km)
     # Bound parameters only; model text is never SQL or a filesystem path.
@@ -57,6 +81,13 @@ def search(category='all', keyword='', district='', latitude=None, longitude=Non
     if category != 'all':
         sql += ' AND osm_id IN (SELECT osm_id FROM categories WHERE category=?)'
         params.append(category)
+    if counties:
+        sql += ' AND county IN (' + ','.join('?' for _ in counties) + ')'
+        params.extend(counties)
+    if latitude is not None and radius_km is not None:
+        delta = radius_km / 110.0
+        sql += ' AND lat BETWEEN ? AND ?'
+        params.extend([latitude-delta, latitude+delta])
     if district:
         sql += ' AND district=?'
         params.append(district)
@@ -64,7 +95,7 @@ def search(category='all', keyword='', district='', latitude=None, longitude=Non
         sql += ' AND instr(search_text, ?) > 0'
         params.append(keyword.casefold().replace('台','臺'))
     sql += ' ORDER BY named DESC, name, osm_id'
-    with sqlite3.connect(f'{DB_PATH.as_uri()}?mode=ro', uri=True) as db:
+    with closing(sqlite3.connect(f'{DB_PATH.as_uri()}?mode=ro', uri=True)) as db:
         db.row_factory = sqlite3.Row
         rows = db.execute(sql, params).fetchall()
     candidates = []
@@ -73,7 +104,7 @@ def search(category='all', keyword='', district='', latitude=None, longitude=Non
         if tags.get('access') in {'private','no'}: continue
         if category == 'rest' and tags.get('access') in {'customers','permit'}: continue
         point = {'osm_id':row['osm_id'], 'name':row['name'], 'name_is_label':not bool(row['named']),
-                 'district':row['district'], 'latitude':row['lat'], 'longitude':row['lon'],
+                 'county':row['county'], 'district':row['district'], 'latitude':row['lat'], 'longitude':row['lon'],
                  'coordinate_type':row['coordinate_type'],
                  'categories':categories(tags), 'address':row['address'] or None,
                  'opening_hours':tags.get('opening_hours'), 'access':tags.get('access'),
@@ -95,20 +126,20 @@ def search(category='all', keyword='', district='', latitude=None, longitude=Non
     return candidates[:limit], len(candidates)
 
 
-def answer(category, keyword='', district='', latitude=None, longitude=None, limit=5, radius_km=None):
-    points, total = search(category,keyword,district,latitude,longitude,limit,radius_km)
-    area = district or '雲林縣'
+def answer(category, keyword='', district='', latitude=None, longitude=None, limit=5, radius_km=None, counties=None):
+    points, total = search(category,keyword,district,latitude,longitude,limit,radius_km,counties)
+    area = '、'.join(counties or []) + district or '臺灣'
     label = LABELS.get(category,'地點')
     if not points:
-        reply = f'本機雲林 OSM 資料中找不到符合條件的{area}{label}，不代表當地沒有。'
+        reply = f'本機臺灣 OSM 資料中找不到符合條件的{area}{label}，不代表當地沒有。'
         if category == 'rest': reply += '可改查公園或咖啡店，但座位與開放狀態需要另行確認。'
     else:
         names = '、'.join(p['name'] for p in points)
         reply = f'找到 {total} 筆符合條件的{label}，列出 {len(points)} 筆：{names}。'
         if latitude is None: reply += '未提供目前位置，這些結果未按距離排序。'
-        else: reply += '已依直線距離排序；距離不是步行路程。'
+        else: reply += '已依直線距離排序；距離不是行駛路程。'
         if category == 'rest': reply += '這些地點有座椅或休息設施標註，無法確認目前是否有空位。'
         reply += '離線資料無法確認即時營業或開放狀態。'
     if radius_km is not None:
-        reply = f'以座標 {latitude}, {longitude} 為中心，僅查詢直線距離 {radius_km:g} 公里內的雲林地點。' + reply
+        reply = f'以座標 {latitude}, {longitude} 為中心，僅查詢直線距離 {radius_km:g} 公里內的地點。' + reply
     return {'places':points, 'reply':reply}

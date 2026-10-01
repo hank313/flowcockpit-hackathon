@@ -16,9 +16,15 @@ def number(value):
     return float(value)
 
 
+def radius_matches(text):
+    # Driving/walking constraints are not a straight-line search radius.
+    return [m for m in RADIUS.finditer(text) if not re.search(
+        r'(?:行駛|開車|駕車|車程|步行|走路)(?:距離)?\s*(?:不超過|最多|在)?\s*$', text[:m.start()])]
+
+
 def extract_scope(text):
     coords = COORDINATES.findall(text)
-    radii = RADIUS.findall(text)
+    radii = [m.groups() for m in radius_matches(text)]
     if len(set(coords)) > 1 or len(set(radii)) > 1:
         raise ValueError('找到多組座標或範圍，請只提供一組搜尋中心與半徑。')
     lat,lon = map(float,coords[0]) if coords else (None,None)
@@ -49,4 +55,7 @@ def resolve_scope(text, instruction, latitude=None, longitude=None, radius_km=No
 
 
 def without_scope(text):
-    return RADIUS.sub('',COORDINATES.sub('',text)).strip(' ，,。')
+    text = COORDINATES.sub('',text)
+    for match in reversed(radius_matches(text)):
+        text = text[:match.start()] + text[match.end():]
+    return text.strip(' ，,。')

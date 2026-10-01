@@ -1,8 +1,8 @@
-# 雲林離線語音地點搜尋
+# 臺灣離線語音地點搜尋
 
 音訊 → 本機 faster-whisper → Ollama `llama3.2:1b` → 本機 SQLite 地點查詢。
 
-成功回應包含 `places`（地點清單）、`reply`（文字回覆）與 `bc_to_d`（傳給 D 的意圖條件），支援地點類別、鄉鎮、名稱及指定座標半徑搜尋。距離為直線距離，不提供導航。
+成功回應包含 `places`（地點清單）、`reply`（文字回覆）與 `bc_to_d`（傳給 D 的意圖條件），支援地點類別、縣市、鄉鎮市區、名稱及指定座標半徑搜尋。距離為直線距離，不提供導航。
 
 儲存庫只包含程式碼、依賴設定與操作說明。錄音、模型、地圖資料、測試程式、測試結果及本機環境均不提交。
 
@@ -11,8 +11,8 @@
 需要 Python（含 venv、pip）及 [Ollama](https://ollama.com/)。以下為 Bash 指令：
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/ollama-audio-json.git
-cd ollama-audio-json
+git clone https://github.com/hank313/flowcockpit-hackathon.git
+cd flowcockpit-hackathon/bc
 python3 -m venv .venv
 .venv/bin/python -m pip install -r requirements.txt
 ollama pull llama3.2:1b
@@ -26,11 +26,15 @@ clone 後需要先建立資料庫；Git 不包含 `data/`。從 [Geofabrik Taiwa
 
 ```bash
 .venv/bin/python -m pip install -r requirements-data.txt
-.venv/bin/python build_places.py /完整路徑/taiwan.osm.pbf \
-  --source-url '實際下載的 Geofabrik URL'
+mkdir -p data
+curl -fL --retry 3 https://download.geofabrik.de/asia/taiwan-latest.osm.pbf -o data/taiwan.osm.pbf
+.venv/bin/python build_places.py data/taiwan.osm.pbf \
+  --source-url https://download.geofabrik.de/asia/taiwan-latest.osm.pbf
 ```
 
-程式依雲林縣界及其 20 個鄉鎮擷取地點，建立 `data/yunlin.sqlite3`、來源資訊與行政邊界。建置失敗時保留原資料庫。`osmium`、`shapely` 只在建置資料時需要。
+程式依臺灣 22 個縣市邊界擷取地點，包含澎湖、金門與連江，建立 `data/taiwan.sqlite3`、`metadata.json`、`ATTRIBUTION.md` 與行政邊界。原始檔中鄰近國外的地點不納入。若縣市界缺漏，使用其 subarea 邊界聯集並記錄於 metadata。擷取檔缺少遠方島嶼成員時，只恢復檔內已閉合的行政區外環，不人工連接缺漏邊界；覆蓋限制記錄於 `partial_boundaries`。22 縣市皆可查詢，但不保證所有偏遠島嶼及所有設施都已收錄。建置失敗時保留原資料庫。`osmium`、`shapely` 只在建置資料時需要。
+
+本機已建置的快照日期為 `2026-09-29T20:22:51Z`，共 300,695 筆地點、22 縣市及 368 鄉鎮市區邊界。高雄市界由行政區聯集合成；旗津區僅含擷取檔中可重建的閉合外環，遠方島嶼可能缺漏。40 筆地點可辨識縣市，但無法配對行政區，`district` 為空字串。實際安裝版本以 `/api/places/info` 為準，下載 latest 重建時筆數會改變。
 
 也可以將先前建立的 `data/` 複製到專案根目錄，在本機使用；它不會被 Git 追蹤。若沒有資料庫，搜尋介面會回傳 `places_unavailable`。
 
@@ -54,7 +58,9 @@ bash run.sh
 
 ```bash
 bash run.sh --text '找一個休息地點'
-bash run.sh --text '找虎尾的咖啡店' --limit 3
+bash run.sh --text '找雲林虎尾的咖啡店' --limit 3
+bash run.sh --text '找台北市中正區的咖啡店' --limit 3
+bash run.sh --text '找高雄市的公園' --limit 3
 bash run.sh recording.wav --language zh > result.json
 ```
 
@@ -85,6 +91,8 @@ curl http://127.0.0.1:8000/api/audio \
 
 座標順序為緯度、經度，兩者須一起提供。指定半徑時必須有搜尋中心。先篩選範圍，再依直線距離排序及限制筆數；找不到時不會自動擴大範圍。未提供位置時不宣稱最近。`limit` 預設 5，上限 20。
 
+「台／臺」皆可查詢。僅說「中正區」等重複行政區名稱時，程式會請你補充縣市。指定縣市與行政區時會同時篩選；未指定區域則查詢全臺資料。搜尋半徑仍為直線距離，與 BC → D 的行駛距離條件不同。
+
 ## 回應格式
 
 一般查詢的回應包含 `places`、`reply` 與 `bc_to_d`：
@@ -93,7 +101,7 @@ curl http://127.0.0.1:8000/api/audio \
 {"places": [], "reply": "查詢結果的文字說明", "bc_to_d": {"intent":"search_rest_stop","conditions":{},"raw_text":"找休息地點"}}
 ```
 
-地點包含名稱、OSM ID、鄉鎮、緯經度、類別、地址、來源連結及距離。未命名地點使用顯示標籤，`name_is_label=true`；面狀地點的座標是代表點，不是入口。
+地點包含名稱、OSM ID、縣市 `county`、鄉鎮市區 `district`、緯經度、類別、地址、來源連結及距離。未命名地點使用顯示標籤，`name_is_label=true`；面狀地點的座標是代表點，不是入口。
 
 模型負責解析搜尋需求；地名、座標與查詢回覆由資料庫和程式提供。一般聊天則回傳空的 `places` 與模型回答。
 
@@ -105,7 +113,7 @@ curl http://127.0.0.1:8000/api/audio \
 - `bash run.sh --serve --port 8001`：指定服務埠。
 - 音訊上限 25 MiB、5 分鐘、轉錄 6000 字；一次處理一段音訊。
 - 地點資料只涵蓋已標註設施，無法確認即時營業、空位及通行權限。休息查詢需要座椅等相關標註。
-- 1B 模型可能誤判意圖；目前支援單一類別、地名、鄉鎮和半徑，不支援複雜否定、價格或即時條件。
+- 1B 模型可能誤判意圖；目前支援單一類別、地名、縣市、鄉鎮市區和半徑，不支援複雜否定、價格或即時條件。
 
 ## BC → D 意圖介面
 
