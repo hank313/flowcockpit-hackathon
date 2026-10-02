@@ -39,7 +39,8 @@ htmlcov/
 .vscode/
 
 # Code-only repository: keep local data and verification artifacts out of Git
-data/
+data/*
+!data/last_location.json
 test_*.py
 *_test.py
 tests/
@@ -47,3 +48,6 @@ test-results/
 reports/
 example*-result.json
 requirements-lock.txt
+
+# Synthetic demo audio is intentionally shared for API verification
+!examples/rest-stop.wav

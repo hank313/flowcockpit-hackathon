@@ -4,7 +4,7 @@
 
 成功回應包含 `places`（地點清單）、`reply`（文字回覆）與 `bc_to_d`（傳給 D 的意圖條件），支援地點類別、縣市、鄉鎮市區、名稱及指定座標半徑搜尋。距離為直線距離，不提供導航。
 
-儲存庫只包含程式碼、依賴設定與操作說明。錄音、模型、地圖資料、測試程式、測試結果及本機環境均不提交。
+儲存庫包含程式碼、依賴設定、操作說明，以及供下載驗證的 `examples/` 範例音訊、JSON、Python 程式。`data/last_location.json` 位置紀錄也納入 Git。私人錄音、模型、地圖資料庫、內部測試檔、原始測試日誌及本機環境不提交；README 保留驗證結果摘要。
 
 ## 安裝
 
@@ -22,7 +22,7 @@ ollama pull llama3.2:1b
 
 ## 準備本機地圖資料
 
-clone 後需要先建立資料庫；Git 不包含 `data/`。從 [Geofabrik Taiwan](https://download.geofabrik.de/asia/taiwan.html) 下載 Taiwan `.osm.pbf`，然後執行：
+clone 後需要先建立資料庫；Git 不包含地圖資料庫；`data/` 中僅 `last_location.json` 納入版本控制。從 [Geofabrik Taiwan](https://download.geofabrik.de/asia/taiwan.html) 下載 Taiwan `.osm.pbf`，然後執行：
 
 ```bash
 .venv/bin/python -m pip install -r requirements-data.txt
@@ -36,7 +36,7 @@ curl -fL --retry 3 https://download.geofabrik.de/asia/taiwan-latest.osm.pbf -o d
 
 本機已建置的快照日期為 `2026-09-29T20:22:51Z`，共 300,695 筆地點、22 縣市及 368 鄉鎮市區邊界。高雄市界由行政區聯集合成；旗津區僅含擷取檔中可重建的閉合外環，遠方島嶼可能缺漏。40 筆地點可辨識縣市，但無法配對行政區，`district` 為空字串。實際安裝版本以 `/api/places/info` 為準，下載 latest 重建時筆數會改變。
 
-也可以將先前建立的 `data/` 複製到專案根目錄，在本機使用；它不會被 Git 追蹤。若沒有資料庫，搜尋介面會回傳 `places_unavailable`。
+也可以將先前建立的 `data/` 複製到專案根目錄，在本機使用；其中地圖資料不會被 Git 追蹤，位置紀錄 `last_location.json` 除外。若沒有資料庫，搜尋介面會回傳 `places_unavailable`。
 
 地圖資料 © OpenStreetMap contributors，依 [ODbL 1.0](https://opendatacommons.org/licenses/odbl/1-0/) 授權；來源與說明見 [OpenStreetMap](https://www.openstreetmap.org/copyright)。程式碼的開源授權尚未指定。
 
@@ -60,7 +60,8 @@ bash run.sh --serve --port 8002
 | --- | --- | --- | --- |
 | POST | `/api/audio` | `multipart/form-data`；`file` 音訊檔 | 語音轉文字、解析意圖；回傳 `places`、`reply`、`bc_to_d` |
 | POST | `/api/text` | `application/json`；`text` | 文字搜尋／解析意圖；回傳 `places`、`reply`、`bc_to_d` |
-| POST | `/api/intent` | `application/json`；`text` | 只回傳 BC → D 物件：`intent`、`conditions`、`raw_text`，以及有指定時的 `reference`；不查地圖 |
+| POST | `/api/intent` | JSON 的 `text`，或 multipart 的 `file` 音訊 | 只回傳 BC → D 物件：`intent`、`conditions`、`raw_text`，以及有指定時的 `reference`；不查地圖 |
+| GET | `/api/location` | 無 | 最近一次成功請求提供的經緯度、UTC 更新時間與來源 API；無紀錄時 404 |
 | GET | `/api/places/info` | 無 | 地點數量、覆蓋範圍、資料日期、來源及授權 |
 | GET | `/docs` | 無 | Swagger 互動測試頁 |
 | GET | `/redoc` | 無 | API 文件閱讀頁 |
@@ -71,9 +72,9 @@ bash run.sh --serve --port 8002
 
 **選填欄位：**
 
-- `/api/audio`：表單可帶 `language`（預設 `auto`，中文可填 `zh`）、`instruction`、`latitude`、`longitude`、`radius_km`、`limit`、`context_json`。
+- `/api/audio`：表單可帶 `language`（預設 `auto`，中文可填 `zh`）、`instruction`、`latitude`、`longitude`、`radius_km`、`limit`、`type`、`target_candidate_id`、`context_json`。
 - `/api/text`：JSON 可帶 `instruction`、`latitude`、`longitude`、`radius_km`、`limit`；上位機上下文 `reference`、`reference_type`、`candidate_ids`、`short_drive_distance_m` 直接放在 JSON 最外層。
-- `/api/intent`：使用相同文字請求結構，但只做意圖抽取；搜尋座標、半徑與筆數不會觸發地點查詢。
+- `/api/intent`：JSON 使用相同文字請求結構；音訊使用 multipart 的 `file`、`language`（預設 `auto`）、`context_json`（預設 `{}`），另可直接傳 `latitude`、`longitude`、`type`、`target_candidate_id`；JSON 文字請求也支援這四個欄位。只做意圖抽取，不查地圖；座標轉交 D，音訊表單不接受 `radius_km`。JSON 的搜尋半徑與筆數不會觸發地點查詢。
 - 音訊的上位機上下文放入 `context_json`（JSON 字串）。`reference.type` 由上位機指定；完整範例見下方「BC → D 意圖介面」。
 
 `latitude`、`longitude` 必須成對提供。搜尋 `radius_km` 是直線半徑（公里），需要中心座標；`limit` 預設 5、範圍 1–20。`max_drive_distance_m` 是交給 D 的行駛距離條件（公尺），不是搜尋半徑。
@@ -152,6 +153,20 @@ curl -sS -X POST http://127.0.0.1:8001/api/audio \
 
 此時回傳 `places: []`，`bc_to_d.conditions` 包含 `indoor: true`、`has_seating: true`、`max_drive_distance_m: 500`，`reference` 保留上位機指定值。完整外層格式與下方文字 API 的條件範例相同，`raw_text` 則來自實際語音辨識。
 
+音訊也可直接傳經緯度、type 與候選 ID，不必包在 `context_json`：
+
+```bash
+curl -sS http://127.0.0.1:8001/api/audio \
+  -F 'file=@examples/rest-stop.wav' \
+  -F 'language=zh' \
+  -F 'latitude=23.718645' \
+  -F 'longitude=120.573271' \
+  -F 'type=modify' \
+  -F 'target_candidate_id=loc_002'
+```
+
+回應仍為 `places`、`reply`、`bc_to_d`。`bc_to_d` 包含原樣傳入的 `latitude`、`longitude`、`type`，以及組成的 `reference`；其內容與下方 `/api/intent` 經緯度範例相同。指定操作時由 D 處理，`places` 為空。成功處理後的位置可用 `/api/location` 查詢。
+
 ### POST /api/text：文字搜尋與條件抽取
 
 指定縣市、行政區及類別：
@@ -217,7 +232,68 @@ curl -sS -X POST http://127.0.0.1:8001/api/text \
 }
 ```
 
-### POST /api/intent：只取得 BC → D JSON
+### POST /api/intent：文字或音訊直接取得 BC → D JSON
+
+**音訊輸入：** 直接上傳音訊即可，不必先呼叫 `/api/audio`。此端點不會讀取先前請求的音訊；每次音訊請求都要上傳 `file`。
+
+```bash
+curl -sS -X POST http://127.0.0.1:8001/api/intent \
+  -F 'file=@recording.wav' \
+  -F 'language=zh'
+```
+
+音訊內容若為「找個室內、有座位、行駛500公尺內的地方」，成功時直接得到 `intent`、`conditions`、`raw_text`；未提供上位機上下文時不輸出 `reference`。
+
+**音訊直接傳經緯度、操作與目標 ID：**
+
+```bash
+curl -sS -X POST http://127.0.0.1:8001/api/intent \
+  -F 'file=@recording.wav' \
+  -F 'language=zh' \
+  -F 'latitude=23.718645' \
+  -F 'longitude=120.573271' \
+  -F 'type=modify' \
+  -F 'target_candidate_id=loc_002'
+```
+
+假設語音為「請幫我找一個可以休息的地方」，回傳示例：
+
+```json
+{
+  "intent": "search_rest_stop",
+  "conditions": {},
+  "reference": {"type": "modify", "target_candidate_id": "loc_002"},
+  "raw_text": "請幫我找一個可以休息的地方",
+  "latitude": 23.718645,
+  "longitude": 120.573271,
+  "type": "modify"
+}
+```
+
+- 經緯度為 WGS84 十進位度數，須成對提供；緯度 -90～90、經度 -180～180，不接受 NaN／Infinity。回傳保留上位機傳入的座標，不由模型推測，也不在此介面搜尋地點或計算路線。
+- `type` 由上位機指定（英文字母開頭，允許英數、底線、連字號，最多 64 字），原樣回傳；只傳 `type` 時不編造目標 ID。
+- `target_candidate_id` 是非空、無空白、最多 128 字的候選 ID。直接提供目標時需同時指定 `type`，或沿用上下文的 `reference_type`／`reference.type`。目標會放在回應的 `reference.target_candidate_id`。
+- 舊的 `context_json` 仍可使用；直接欄位與上下文的 type 或目標不同時回傳 422。未提供的座標及頂層 `type` 不輸出。
+- JSON 文字也可直接傳入這些欄位：
+
+```bash
+curl -sS http://127.0.0.1:8001/api/intent \
+  -H 'Content-Type: application/json' \
+  -d '{"text":"找休息地點","latitude":23.718645,"longitude":120.573271,"type":"modify","target_candidate_id":"loc_002"}'
+```
+
+**音訊加上位機操作：**
+
+```bash
+curl -sS -X POST http://127.0.0.1:8001/api/intent \
+  -F 'file=@recording.wav' \
+  -F 'language=zh' \
+  -F 'context_json={"reference":{"type":"modify","target_candidate_id":"loc_002"}}'
+```
+
+支援與 `/api/audio` 相同的音訊格式、25 MiB／5 分鐘限制及語音辨識模型。若指定「第二個」等候選但缺少候選清單或 type，回傳 422 `clarification_needed`。格式錯誤的上下文也會回傳 422，不會忽略後繼續執行。
+
+**原有 JSON 文字輸入仍可使用：**
 
 ```bash
 curl -sS -X POST http://127.0.0.1:8001/api/intent \
@@ -264,6 +340,29 @@ curl -sS http://127.0.0.1:8001/api/places/info
 ```
 
 完整結果另含 `counties`、`county_counts`、`category_counts`、來源 URL、SHA-256 與邊界覆蓋限制；此請求不呼叫 Ollama。
+
+### GET /api/location：查詢最近一次位置
+
+```bash
+curl -sS http://127.0.0.1:8001/api/location
+```
+
+成功回傳示例：
+
+```json
+{
+  "latitude": 23.718645,
+  "longitude": 120.573271,
+  "updated_at": "2026-10-02T09:22:00+00:00",
+  "source": "/api/audio"
+}
+```
+
+- 只保留**最近一次成功儲存的位置**，不是歷史軌跡。`updated_at` 是伺服器儲存時間（UTC），不是 GPS 採樣時間。
+- `/api/audio` 以及 `/api/intent` 的音訊／JSON 請求，只要成功並明確提供成對經緯度，就更新紀錄；未提供座標或處理失敗時保留原紀錄。不從模型回答或逐字稿推測紀錄位置。
+- 寫入 `data/last_location.json`，採原子替換；重新啟動服務後仍可查詢。紀錄不存在時回傳 404 `location_not_found`，檔案損壞或無法讀寫時回傳 503 `location_unavailable`。
+- 此版本是**整個服務共用一筆紀錄**，沒有依使用者或裝置區分。Git 中附帶的是範例位置，下載後未送出新座標前，查到的是該紀錄。
+- 位置紀錄已納入 Git；重新推送 `data/last_location.json` 時會更新共享的位置內容。地圖資料庫仍不推送。
 
 ### GET /docs：互動測試頁
 
@@ -370,7 +469,7 @@ curl http://127.0.0.1:8001/api/audio \
 
 ## BC → D 意圖介面
 
-`POST /api/text` 與 `POST /api/audio` 在原回應中新增 `bc_to_d`。新增的 `POST /api/intent` 則只回傳 BC → D 物件，不需要地圖資料庫。
+`POST /api/text` 與 `POST /api/audio` 在原回應中新增 `bc_to_d`。`POST /api/intent` 接受 JSON 文字或 multipart 音訊，只回傳 BC → D 物件，不需要地圖資料庫。
 
 **`reference.type` 完全由上位機輸入**，不交由模型分類，也沒有預設操作。它是非空操作字串（英文字母開頭，允許英數字、底線與連字號），具體操作是否可執行由 D 決定。
 
@@ -423,3 +522,34 @@ curl http://127.0.0.1:8001/api/audio   -F 'file=@recording.wav' -F 'language=zh'
 - `intent` 值為 `search_rest_stop`、`search_place`、`chat`，需要釐清時為 `clarify`。D 需依其任務流程處理；本程式沒有直接傳送資料到 D 的網路服務。
 
 距離欄位已改為 `max_drive_distance_m`（公尺）；上位機預設參數改為 `short_drive_distance_m`，測試程式對應 `--short-drive-distance-m`。舊的步行欄位不再輸出，舊參數會被 API 拒絕。明確步行語句不會被轉成行駛距離。`不用開太遠` 保留原本可設定的 300 公尺預設；實際行駛路程須由 D 或路網服務驗證。
+
+## 下載範例與驗證結果
+
+`examples/rest-stop.wav` 是合成語音「請幫我找一個可以休息的地方」，不是私人錄音。`examples/intent-request.json` 提供文字、經緯度、type 與候選 ID。`examples/verify_api.py` 會依序呼叫文字意圖、音訊意圖、音訊完整回應及位置查詢，印出實際 JSON 並檢查關鍵欄位。
+
+在 `bc` 目錄安裝依賴及 Whisper／Ollama 模型並啟動服務後，另一個終端執行：
+
+```bash
+.venv/bin/python examples/verify_api.py
+```
+
+跨電腦可使用：
+
+```bash
+.venv/bin/python examples/verify_api.py --base-url http://伺服器區網IP:8001
+```
+
+成功最後會印出 `PASS：文字、音訊、操作欄位與位置紀錄驗證完成。`；失敗時印出錯誤並以非零狀態結束。這組範例會把位置更新成 `23.718645, 120.573271`。因為提供完整 reference，範例不會執行地圖搜尋，無需先建置全臺資料庫；Ollama 與 Whisper 仍需可用。
+
+2026-10-02 實際驗證（Whisper `small`、Ollama `llama3.2:1b`、port 8001）：
+
+| 驗證項目 | 結果 |
+| --- | --- |
+| JSON `/api/intent` | HTTP 200；抽取室內、座位與 `max_drive_distance_m: 500` |
+| 音訊 `/api/intent` | HTTP 200；直接回傳 BC → D，辨識出範例語音，保留座標及 `modify / loc_002` |
+| 音訊 `/api/audio` | HTTP 200；回傳 `places`、`reply`、`bc_to_d`，BC → D 保留相同座標及操作 |
+| `/api/location` | HTTP 200；與輸入經緯度相同，source 依序為 `/api/intent`、`/api/audio` |
+| 服務重啟後查位置 | HTTP 200；座標、來源及更新時間完整保留 |
+| 內部自動檢查 | 50 項通過，包含經緯度範圍、成對欄位、type／ID 衝突、失敗不覆寫、缺少／損壞紀錄及既有搜尋回歸 |
+
+本次提交的範例位置紀錄 `updated_at` 為 `2026-10-02T09:22:40.941438+00:00`，source 為 `/api/audio`。其他人執行驗證後時間會更新；原始測試日誌與內部測試檔不納入 Git。

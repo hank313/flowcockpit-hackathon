@@ -12,10 +12,13 @@ import threading
 from typing import Literal
 
 import httpx
-from fastapi import FastAPI, File, Form, UploadFile
+from fastapi import FastAPI, File, Form, UploadFile, Request
+from starlette.concurrency import run_in_threadpool
+from starlette.datastructures import UploadFile as StarletteUploadFile
 from fastapi.responses import JSONResponse, RedirectResponse
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 import places
+import location_store
 from bc_intent import BCIntent, CandidateContext, extract as extract_bc
 from search_scope import resolve_scope, without_scope
 from opencc import OpenCC
@@ -110,6 +113,29 @@ class TextRequest(CandidateContext):
             raise ValueError('latitude 和 longitude 必須一起提供')
         if not self.text.strip():
             raise ValueError('text 不可全為空白')
+        return self
+
+
+class IntentRequest(TextRequest):
+    target_candidate_id: str | None = Field(default=None,min_length=1,max_length=128,pattern=r'^\S+$')
+    type: str | None = Field(default=None,min_length=1,max_length=64,pattern=r'^[A-Za-z][A-Za-z0-9_-]*$')
+
+    @model_validator(mode='after')
+    def validate_operation(self):
+        if self.type is not None:
+            if self.reference_type is not None and self.reference_type != self.type:
+                raise ValueError('type 與 reference_type 不一致。')
+            if self.reference is not None and self.reference.type != self.type:
+                raise ValueError('type 與 reference.type 不一致。')
+            self.reference_type = self.type
+        if self.target_candidate_id is not None:
+            operation = self.type or self.reference_type or (self.reference.type if self.reference else None)
+            if not operation:
+                raise ValueError('指定 target_candidate_id 時必須提供 type。')
+            if self.reference and self.reference.target_candidate_id != self.target_candidate_id:
+                raise ValueError('target_candidate_id 與 reference.target_candidate_id 不一致。')
+            from bc_intent import Reference
+            self.reference = Reference(type=operation,target_candidate_id=self.target_candidate_id)
         return self
 
 
@@ -216,7 +242,7 @@ def respond_places(text, instruction=DEFAULT_INSTRUCTION, latitude=None, longitu
 
 
 def process_audio(path, language="auto", instruction=DEFAULT_INSTRUCTION,
-                  latitude=None, longitude=None, limit=5, radius_km=None, context=None):
+                  latitude=None, longitude=None, limit=5, radius_km=None, context=None, intent_only=False):
     global whisper
     if not instruction.strip() or len(instruction) > 2000:
         raise PipelineError("invalid_instruction", "任務指令需為 1–2000 字。")
@@ -275,6 +301,8 @@ def process_audio(path, language="auto", instruction=DEFAULT_INSTRUCTION,
             raise PipelineError("no_speech", "未辨識到語音，請提供有清楚人聲的音訊。")
         if len(transcript) > 6000:
             raise PipelineError("transcript_too_long", "辨識文字超過 6000 字，請分段提交音訊。", 413)
+        if intent_only:
+            return extract_intent(transcript, context)
         return respond(transcript,instruction,latitude,longitude,limit,radius_km,context)
     except PipelineError:
         raise
@@ -301,20 +329,89 @@ def index():
     return RedirectResponse("/docs")
 
 
-@app.post('/api/intent', response_model=BCIntent, response_model_exclude_none=True)
-def intent_endpoint(request: TextRequest):
-    """只回傳 BC → D 合約，不查詢地圖或修改 D 的任務狀態。"""
-    parsed = interpret_query(traditional.convert(request.text))
-    result, clarification = extract_bc(request.text,parsed.action,parsed.category,request)
+def extract_intent(text, context=None):
+    parsed = interpret_query(traditional.convert(text))
+    result, clarification = extract_bc(text,parsed.action,parsed.category,context)
     if clarification:
         raise PipelineError('clarification_needed',clarification)
+    result.latitude = getattr(context, 'latitude', None)
+    result.longitude = getattr(context, 'longitude', None)
+    result.type = getattr(context, 'type', None)
     return result
+
+
+@app.post('/api/intent', response_model=BCIntent, response_model_exclude_none=True,
+          openapi_extra={'requestBody': {'required': True, 'content': {
+              'application/json': {'schema': {k: v for k, v in IntentRequest.model_json_schema(ref_template='#/components/schemas/{model}').items() if k != '$defs'}},
+              'multipart/form-data': {'schema': {'type': 'object', 'required': ['file'],
+                  'properties': {
+                      'file': {'type': 'string', 'format': 'binary'},
+                      'language': {'type': 'string', 'default': 'auto'},
+                      'target_candidate_id': {'type': 'string', 'minLength': 1, 'maxLength': 128, 'pattern': r'^\S+$'},
+                      'latitude': {'type': 'number', 'minimum': -90, 'maximum': 90},
+                      'longitude': {'type': 'number', 'minimum': -180, 'maximum': 180},
+                      'type': {'type': 'string', 'pattern': '^[A-Za-z][A-Za-z0-9_-]*$', 'minLength': 1, 'maxLength': 64},
+                      'context_json': {'type': 'string', 'default': '{}', 'maxLength': 10000,
+                                       'description': '上位機 reference、reference_type、candidate_ids、short_drive_distance_m 的 JSON 字串'}
+                  }}}
+          }}})
+async def intent_endpoint(request: Request):
+    """接受 JSON 文字或 multipart 音訊，只回傳 BC → D，不查地圖。"""
+    content_type = request.headers.get('content-type','').split(';',1)[0].strip().lower()
+    if content_type == 'application/json':
+        try:
+            body = IntentRequest.model_validate(await request.json())
+        except (ValidationError, ValueError, UnicodeDecodeError) as exc:
+            raise PipelineError('invalid_request','請提供有效的 JSON 文字請求，包含非空 text 與正確的上位機上下文。') from exc
+        result = await run_in_threadpool(extract_intent, body.text, body)
+        await run_in_threadpool(remember_location, body, '/api/intent')
+        return result
+    if content_type == 'multipart/form-data':
+        async with request.form(max_files=1, max_fields=7, max_part_size=10000) as form:
+            if set(form) - {'file','language','context_json','latitude','longitude','type','target_candidate_id'} or any(len(form.getlist(k)) != 1 for k in form):
+                raise PipelineError('invalid_request','音訊表單僅接受 file、language、context_json、latitude、longitude、type、target_candidate_id，且欄位不可重複。')
+            file = form.get('file')
+            language = form.get('language','auto')
+            context_json = form.get('context_json','{}')
+            if not isinstance(file, StarletteUploadFile):
+                raise PipelineError('missing_file','請在 file 欄位上傳音訊檔。')
+            if not isinstance(language,str) or not isinstance(context_json,str) or len(context_json)>10000:
+                raise PipelineError('invalid_context','language 與 context_json 必須為字串，context_json 上限為 10000 字。')
+            try:
+                candidate = CandidateContext.model_validate_json(context_json)
+                extras = {key: form[key] for key in ('latitude','longitude','type','target_candidate_id') if key in form}
+                context = IntentRequest(text='audio', **candidate.model_dump(), **extras)
+            except ValidationError as exc:
+                raise PipelineError('invalid_context','請檢查經緯度（須成對且在有效範圍）、type 與上下文；操作 type 必須一致。') from exc
+            return await run_in_threadpool(handle_audio_upload, file, language,
+                                          context_json=context_json, intent_only=True, context_override=context)
+    raise PipelineError('unsupported_media_type','請使用 application/json 或 multipart/form-data。',415)
 
 
 @app.post('/api/text', response_model=PlaceReply, response_model_exclude_none=True)
 def text_endpoint(request: TextRequest):
     """輸入「找一個休息地點」。座標選填；未提供時不宣稱最近。"""
     return respond(request.text,request.instruction,request.latitude,request.longitude,request.limit,request.radius_km,request)
+
+
+def remember_location(context, source):
+    if getattr(context, 'latitude', None) is not None:
+        try:
+            location_store.save(context.latitude,context.longitude,source)
+        except (OSError, ValueError) as exc:
+            raise PipelineError('location_unavailable','無法儲存本機位置紀錄。',503) from exc
+
+
+@app.get('/api/location', response_model=location_store.LocationRecord)
+def location_endpoint():
+    """查詢最近一次成功的 audio／intent 請求提供的位置；重啟後保留。"""
+    try:
+        record = location_store.read()
+    except (OSError, ValueError) as exc:
+        raise PipelineError('location_unavailable','本機位置紀錄無法讀取。',503) from exc
+    if record is None:
+        raise PipelineError('location_not_found','尚未收到位置，請先透過 audio 或 intent API 傳入經緯度。',404)
+    return record
 
 
 @app.get('/api/places/info')
@@ -333,13 +430,28 @@ def audio_endpoint(file: UploadFile = File(...), language: str = Form("auto"),
                    longitude: float | None = Form(None, ge=-180,le=180),
                    radius_km: float | None = Form(None,gt=0,allow_inf_nan=False,description='搜尋半徑（公里），例如 5；也可寫在 instruction 中'),
                    limit: int = Form(5,ge=1,le=20),
+                   type: str | None = Form(None,min_length=1,max_length=64,pattern=r'^[A-Za-z][A-Za-z0-9_-]*$'),
+                   target_candidate_id: str | None = Form(None,min_length=1,max_length=128,pattern=r'^\S+$'),
                    context_json: str = Form('{}',max_length=10000,description='上位機的 JSON：reference_type、candidate_ids；或完整 reference；可設定 short_drive_distance_m')):
     """展開後按 Try it out → 選擇檔案 → Execute。首次執行會下載 Whisper。"""
+    return handle_audio_upload(file,language,instruction,latitude,longitude,limit,radius_km,context_json,
+                               operation_type=type,target_candidate_id=target_candidate_id)
+
+
+def handle_audio_upload(file, language='auto', instruction=DEFAULT_INSTRUCTION,
+                        latitude=None, longitude=None, limit=5, radius_km=None,
+                        context_json='{}', intent_only=False, context_override=None, operation_type=None, target_candidate_id=None):
     try:
         try:
-            context = CandidateContext.model_validate_json(context_json)
+            if context_override is not None:
+                context = context_override
+            else:
+                candidate = CandidateContext.model_validate_json(context_json)
+                context = IntentRequest(text='audio',latitude=latitude,longitude=longitude,
+                                        type=operation_type,target_candidate_id=target_candidate_id,
+                                        **candidate.model_dump())
         except ValidationError as exc:
-            raise PipelineError('invalid_context','context_json 格式錯誤，請檢查 reference.type 與候選清單。') from exc
+            raise PipelineError('invalid_context','請檢查經緯度、type、target_candidate_id 與 context_json；直接欄位與上下文必須一致。') from exc
         if (latitude is None) != (longitude is None):
             raise PipelineError('invalid_coordinates','latitude 和 longitude 必須一起提供。')
         with tempfile.TemporaryDirectory(prefix="ollama-audio-") as directory:
@@ -351,7 +463,16 @@ def audio_endpoint(file: UploadFile = File(...), language: str = Form("auto"),
                     if size > MAX_BYTES:
                         raise PipelineError("file_too_large", "檔案上限為 25 MiB。", 413)
                     output.write(chunk)
-            return process_audio(path, language, instruction,latitude,longitude,limit,radius_km,context)
+            if intent_only:
+                result = process_audio(path,language,context=context,intent_only=True)
+            else:
+                result = process_audio(path, language, instruction,latitude,longitude,limit,radius_km,context)
+                for key in ('latitude','longitude','type'):
+                    value = getattr(context,key,None)
+                    if value is not None:
+                        result['bc_to_d'][key] = value
+            remember_location(context, '/api/intent' if intent_only else '/api/audio')
+            return result
     except PipelineError:
         raise
     except Exception as exc:
