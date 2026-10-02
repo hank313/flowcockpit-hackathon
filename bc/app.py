@@ -367,7 +367,7 @@ def main():
     parser.add_argument("--language", default="auto", help="auto / zh / en / ja …")
     parser.add_argument("--instruction", default=DEFAULT_INSTRUCTION)
     parser.add_argument("--serve", action="store_true", help="啟動本機 API 與上傳測試頁")
-    parser.add_argument("--port", type=int, default=8000)
+    parser.add_argument("--port", type=int, default=8001)
     parser.add_argument('--text', help='不錄音，直接輸入地點搜尋需求')
     parser.add_argument('--latitude',type=float)
     parser.add_argument('--longitude',type=float)

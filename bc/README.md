@@ -46,13 +46,266 @@ curl -fL --retry 3 https://download.geofabrik.de/asia/taiwan-latest.osm.pbf -o d
 bash run.sh
 ```
 
-開啟 http://127.0.0.1:8000/docs：
+預設監聽 `127.0.0.1:8001`，API 基底網址為 `http://127.0.0.1:8001`。指定其他 port：
 
-- `POST /api/audio`：上傳音訊，中文可指定 `language=zh`。
-- `POST /api/text`：直接以文字查詢。
-- `GET /api/places/info`：查看本機資料日期、範圍及來源。
+```bash
+bash run.sh --serve --port 8002
+```
+
+## API 端口與路徑總覽
+
+以下所有路徑共用 **8001** port：
+
+| 方法 | 路徑 | 輸入格式／必要欄位 | 用途與回傳 |
+| --- | --- | --- | --- |
+| POST | `/api/audio` | `multipart/form-data`；`file` 音訊檔 | 語音轉文字、解析意圖；回傳 `places`、`reply`、`bc_to_d` |
+| POST | `/api/text` | `application/json`；`text` | 文字搜尋／解析意圖；回傳 `places`、`reply`、`bc_to_d` |
+| POST | `/api/intent` | `application/json`；`text` | 只回傳 BC → D 物件：`intent`、`conditions`、`raw_text`，以及有指定時的 `reference`；不查地圖 |
+| GET | `/api/places/info` | 無 | 地點數量、覆蓋範圍、資料日期、來源及授權 |
+| GET | `/docs` | 無 | Swagger 互動測試頁 |
+| GET | `/redoc` | 無 | API 文件閱讀頁 |
+| GET | `/openapi.json` | 無 | OpenAPI 規格，供上位機或工具串接 |
+| GET | `/` | 無 | 重新導向 `/docs` |
+
+本機測試頁：[http://127.0.0.1:8001/docs](http://127.0.0.1:8001/docs)。
+
+**選填欄位：**
+
+- `/api/audio`：表單可帶 `language`（預設 `auto`，中文可填 `zh`）、`instruction`、`latitude`、`longitude`、`radius_km`、`limit`、`context_json`。
+- `/api/text`：JSON 可帶 `instruction`、`latitude`、`longitude`、`radius_km`、`limit`；上位機上下文 `reference`、`reference_type`、`candidate_ids`、`short_drive_distance_m` 直接放在 JSON 最外層。
+- `/api/intent`：使用相同文字請求結構，但只做意圖抽取；搜尋座標、半徑與筆數不會觸發地點查詢。
+- 音訊的上位機上下文放入 `context_json`（JSON 字串）。`reference.type` 由上位機指定；完整範例見下方「BC → D 意圖介面」。
+
+`latitude`、`longitude` 必須成對提供。搜尋 `radius_km` 是直線半徑（公里），需要中心座標；`limit` 預設 5、範圍 1–20。`max_drive_distance_m` 是交給 D 的行駛距離條件（公尺），不是搜尋半徑。
+
+快速確認服務與 BC → D：
+
+```bash
+curl http://127.0.0.1:8001/api/places/info
+
+curl http://127.0.0.1:8001/api/intent \
+  -H 'Content-Type: application/json' \
+  -d '{"text":"找個室內、有座位、行駛500公尺內的地方","reference":{"type":"modify","target_candidate_id":"loc_002"}}'
+```
+
+**上位機在另一台電腦時：** 預設 `127.0.0.1` 只接受本機連線。停止原服務後，在 `bc` 目錄用以下方式監聽區網：
+
+```bash
+.venv/bin/python -m uvicorn app:app --host 0.0.0.0 --port 8001
+```
+
+上位機改用 `http://伺服器區網IP:8001/api/audio` 等網址，且網路需允許 TCP 8001。`0.0.0.0` 是伺服器監聽設定，不是客戶端目的位址；Ollama 的預設 `11434` 是另一個服務，不是本程式 API port。
 
 首次辨識會下載 Whisper 模型至 `models/`。模型與地圖準備完成後，查詢在本機執行。Swagger 頁面需要 CDN，完全離線時可使用命令列或 HTTP API。
+
+## 每個 API 的使用範例
+
+以下使用 Bash／curl。服務需先啟動；`recording.wav` 請換成自己的音訊檔案。回傳內容為格式示例，地點、筆數與辨識文字會依輸入及資料版本改變。
+
+### POST /api/audio：語音輸入，同時輸出地點、回覆與 BC → D
+
+假設音訊內容是「請幫我找一個可以休息的地方」，以上位機提供的座標搜尋 5 公里內地點：
+
+```bash
+curl -sS -X POST http://127.0.0.1:8001/api/audio \
+  -F 'file=@recording.wav' \
+  -F 'language=zh' \
+  -F 'latitude=25.033' \
+  -F 'longitude=121.565' \
+  -F 'radius_km=5' \
+  -F 'limit=1'
+```
+
+成功回傳示例（地點物件僅列部分欄位）：
+
+```json
+{
+  "places": [
+    {
+      "osm_id": "node/2428293148",
+      "name": "市政府(松壽)",
+      "county": "臺北市",
+      "district": "信義區",
+      "latitude": 25.0360098,
+      "longitude": 121.5646026,
+      "categories": ["rest"],
+      "distance_m": 337.1
+    }
+  ],
+  "reply": "以指定座標搜尋直線距離5公里內的休息設施；離線資料無法確認目前是否有空位。",
+  "bc_to_d": {
+    "intent": "search_rest_stop",
+    "conditions": {},
+    "raw_text": "請幫我找一個可以休息的地方"
+  }
+}
+```
+
+音訊包含「找個室內、有座位、行駛500公尺內的地方」，且上位機指定修改 `loc_002` 時：
+
+```bash
+curl -sS -X POST http://127.0.0.1:8001/api/audio \
+  -F 'file=@recording.wav' \
+  -F 'language=zh' \
+  -F 'context_json={"reference":{"type":"modify","target_candidate_id":"loc_002"}}'
+```
+
+此時回傳 `places: []`，`bc_to_d.conditions` 包含 `indoor: true`、`has_seating: true`、`max_drive_distance_m: 500`，`reference` 保留上位機指定值。完整外層格式與下方文字 API 的條件範例相同，`raw_text` 則來自實際語音辨識。
+
+### POST /api/text：文字搜尋與條件抽取
+
+指定縣市、行政區及類別：
+
+```bash
+curl -sS -X POST http://127.0.0.1:8001/api/text \
+  -H 'Content-Type: application/json' \
+  -d '{"text":"找台北市中正區的咖啡店","limit":1}'
+```
+
+成功回傳示例（地點物件僅列部分欄位）：
+
+```json
+{
+  "places": [
+    {
+      "osm_id": "node/3725707064",
+      "name": "初聲咖啡店",
+      "county": "臺北市",
+      "district": "中正區",
+      "latitude": 25.0418715,
+      "longitude": 121.5109423,
+      "categories": ["cafe"],
+      "distance_m": null
+    }
+  ],
+  "reply": "找到符合條件的地點：初聲咖啡店。未提供目前位置，這些結果未按距離排序。",
+  "bc_to_d": {
+    "intent": "search_place",
+    "conditions": {},
+    "raw_text": "找台北市中正區的咖啡店"
+  }
+}
+```
+
+上位機指定操作與目標，並抽取條件：
+
+```bash
+curl -sS -X POST http://127.0.0.1:8001/api/text \
+  -H 'Content-Type: application/json' \
+  -d '{"text":"找個室內、有座位、行駛500公尺內的地方","reference":{"type":"modify","target_candidate_id":"loc_002"}}'
+```
+
+回傳格式：
+
+```json
+{
+  "places": [],
+  "reply": "已抽取指定候選的操作與條件，交由 D 模組處理；此服務未修改任務狀態。",
+  "bc_to_d": {
+    "intent": "search_rest_stop",
+    "conditions": {
+      "indoor": true,
+      "has_seating": true,
+      "max_drive_distance_m": 500
+    },
+    "reference": {
+      "type": "modify",
+      "target_candidate_id": "loc_002"
+    },
+    "raw_text": "找個室內、有座位、行駛500公尺內的地方"
+  }
+}
+```
+
+### POST /api/intent：只取得 BC → D JSON
+
+```bash
+curl -sS -X POST http://127.0.0.1:8001/api/intent \
+  -H 'Content-Type: application/json' \
+  -d '{"text":"找個室內、有座位、行駛500公尺內的地方","reference":{"type":"modify","target_candidate_id":"loc_002"}}'
+```
+
+此介面直接回傳以下物件，沒有 `places`、`reply` 或外層 `bc_to_d`：
+
+```json
+{
+  "intent": "search_rest_stop",
+  "conditions": {
+    "indoor": true,
+    "has_seating": true,
+    "max_drive_distance_m": 500
+  },
+  "reference": {
+    "type": "modify",
+    "target_candidate_id": "loc_002"
+  },
+  "raw_text": "找個室內、有座位、行駛500公尺內的地方"
+}
+```
+
+### GET /api/places/info：查看本機地點資料
+
+```bash
+curl -sS http://127.0.0.1:8001/api/places/info
+```
+
+回傳示例（僅列部分欄位）：
+
+```json
+{
+  "region": "臺灣",
+  "schema_version": 2,
+  "osm_timestamp": "2026-09-29T20:22:51Z",
+  "place_count": 300695,
+  "district_count": 368,
+  "attribution": "© OpenStreetMap contributors",
+  "license": "ODbL 1.0"
+}
+```
+
+完整結果另含 `counties`、`county_counts`、`category_counts`、來源 URL、SHA-256 與邊界覆蓋限制；此請求不呼叫 Ollama。
+
+### GET /docs：互動測試頁
+
+瀏覽器開啟 [Swagger UI](http://127.0.0.1:8001/docs)，展開 API → **Try it out** → 填入資料 → **Execute**。音訊可直接選取檔案。
+
+```bash
+curl -sS http://127.0.0.1:8001/docs
+```
+
+回傳 HTTP 200 與 HTML 頁面，不是 JSON。
+
+### GET /redoc：API 閱讀文件
+
+瀏覽器開啟 [ReDoc](http://127.0.0.1:8001/redoc)，查看請求與回應欄位結構。
+
+```bash
+curl -sS http://127.0.0.1:8001/redoc
+```
+
+回傳 HTTP 200 與 HTML 頁面。Swagger／ReDoc 的前端資源需要 CDN。
+
+### GET /openapi.json：取得 OpenAPI 規格
+
+```bash
+curl -sS http://127.0.0.1:8001/openapi.json
+```
+
+回傳 HTTP 200 與 JSON，包含 `openapi`、`info`、`paths`、`components` 等欄位；上位機可用來產生 API 客戶端或檢查資料結構。
+
+### GET /：導向互動文件
+
+```bash
+curl -sS -D - -o /dev/null http://127.0.0.1:8001/
+```
+
+回傳 HTTP 307，回應標頭包含 `location: /docs`。自動跟隨導向：
+
+```bash
+curl -sS -L http://127.0.0.1:8001/
+```
+
+最後取得 Swagger HTML 頁面。
 
 ## 查詢
 
@@ -74,7 +327,7 @@ bash run.sh --text '找一個休息地點' \
 文字 API：
 
 ```bash
-curl http://127.0.0.1:8000/api/text \
+curl http://127.0.0.1:8001/api/text \
   -H 'Content-Type: application/json' \
   -d '{"text":"找一個休息地點","latitude":23.71,"longitude":120.54,"radius_km":5,"limit":5}'
 ```
@@ -82,7 +335,7 @@ curl http://127.0.0.1:8000/api/text \
 音訊 API：
 
 ```bash
-curl http://127.0.0.1:8000/api/audio \
+curl http://127.0.0.1:8001/api/audio \
   -F 'file=@recording.m4a' -F 'language=zh' \
   -F 'latitude=23.71' -F 'longitude=120.54' -F 'radius_km=5'
 ```
@@ -110,7 +363,7 @@ curl http://127.0.0.1:8000/api/audio \
 - `OLLAMA_URL`：預設 `http://127.0.0.1:11434`。
 - `OLLAMA_MODEL`：預設 `llama3.2:1b`。
 - `WHISPER_MODEL`：預設 `small`，使用 CPU int8。
-- `bash run.sh --serve --port 8001`：指定服務埠。
+- `bash run.sh --serve --port 8001`：指定服務埠（預設 8001）。
 - 音訊上限 25 MiB、5 分鐘、轉錄 6000 字；一次處理一段音訊。
 - 地點資料只涵蓋已標註設施，無法確認即時營業、空位及通行權限。休息查詢需要座椅等相關標註。
 - 1B 模型可能誤判意圖；目前支援單一類別、地名、縣市、鄉鎮市區和半徑，不支援複雜否定、價格或即時條件。
@@ -156,7 +409,7 @@ curl http://127.0.0.1:8000/api/audio \
 音訊 API 使用 multipart 表單中的 `context_json` 欄位傳入上下文：
 
 ```bash
-curl http://127.0.0.1:8000/api/audio   -F 'file=@recording.wav' -F 'language=zh'   -F 'context_json={"reference_type":"modify","candidate_ids":["loc_001","loc_002"]}'
+curl http://127.0.0.1:8001/api/audio   -F 'file=@recording.wav' -F 'language=zh'   -F 'context_json={"reference_type":"modify","candidate_ids":["loc_001","loc_002"]}'
 ```
 
 命令列可使用 `--context-json`，內容與音訊表單相同。
