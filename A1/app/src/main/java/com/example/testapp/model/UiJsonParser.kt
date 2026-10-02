@@ -21,8 +21,8 @@ object UiJsonParser {
 
     fun parseUiDescription(payload: JSONObject): UiDescription {
         val array = payload.optJSONArray("components") ?: JSONArray()
-        val components = (0 until array.length()).mapNotNull { i ->
-            array.optJSONObject(i)?.let(::parseComponent)
+        val components = (0 until array.length()).flatMap { i ->
+            array.optJSONObject(i)?.let(::parseComponent).orEmpty()
         }
         return UiDescription(
             components = components,
@@ -30,7 +30,67 @@ object UiJsonParser {
         )
     }
 
-    private fun parseComponent(obj: JSONObject): UiComponent {
+    // D 用 "component" 欄位,README 共用規範用 "type"
+    private fun parseComponent(obj: JSONObject): List<UiComponent> =
+        if (obj.has("component")) parseDComponent(obj) else listOf(parseSpecComponent(obj))
+
+    private fun parseDComponent(obj: JSONObject): List<UiComponent> {
+        val type = obj.optString("component")
+        val data = obj.optJSONObject("data") ?: JSONObject()
+        return when (type) {
+            "filter_controls" -> {
+                val array = data.optJSONArray("filters") ?: JSONArray()
+                val filters = linkedMapOf<String, Any?>()
+                val labels = mutableMapOf<String, String>()
+                for (i in 0 until array.length()) {
+                    val f = array.optJSONObject(i) ?: continue
+                    val key = f.optString("id")
+                    if (key.isEmpty()) continue
+                    val value = f.opt("value").takeUnless { it == JSONObject.NULL }
+                    // STEPPER 的 value 是 "<= 10 分鐘" 這類字串,取出數字才能調整
+                    filters[key] = if (value is String) firstNumber(value) ?: value else value
+                    f.optStringOrNull("label")?.let { labels[key] = it }
+                }
+                listOf(UiComponent.ConditionControl(type, filters, labels))
+            }
+
+            "candidate_list" -> {
+                val selectedId = data.optStringOrNull("selected_id")
+                val items = data.optJSONArray("items") ?: JSONArray()
+                (0 until items.length()).mapNotNull { i ->
+                    val item = items.optJSONObject(i) ?: return@mapNotNull null
+                    val id = item.optStringOrNull("id") ?: return@mapNotNull null
+                    UiComponent.CandidateCard(
+                        id = "card_$id",
+                        candidateId = id,
+                        name = item.optStringOrNull("name"),
+                        attributes = emptyMap(),
+                        selected = id == selectedId,
+                        tags = listOfNotNull(
+                            item.optStringOrNull("drive_distance_desc"),
+                            item.optStringOrNull("drive_eta_desc"),
+                        ) + item.optJSONArray("tags").toStringList(),
+                    )
+                }
+            }
+
+            "comparison_panel" -> {
+                if (!data.optBoolean("visible", true)) return emptyList()
+                listOf(
+                    UiComponent.CompareConfirmPanel(
+                        id = type,
+                        candidateIds = listOfNotNull(data.optStringOrNull("selected_id")),
+                        comparisonText = data.optStringOrNull("cloud_enhanced_text"),
+                        confirmEnabled = data.optString("status") != "CONFIRMED",
+                    )
+                )
+            }
+
+            else -> listOf(UiComponent.Unsupported(type, type))
+        }
+    }
+
+    private fun parseSpecComponent(obj: JSONObject): UiComponent {
         val type = obj.optString("type")
         val id = obj.optString("id").ifEmpty { "${type}_${obj.hashCode()}" }
         val data = obj.optJSONObject("data") ?: JSONObject()
@@ -74,4 +134,12 @@ object UiJsonParser {
 
     private fun JSONArray.optStringOrNull(index: Int): String? =
         if (isNull(index)) null else optString(index).ifEmpty { null }
+
+    private fun JSONArray?.toStringList(): List<String> =
+        if (this == null) emptyList() else (0 until length()).mapNotNull { optStringOrNull(it) }
+
+    private val NUMBER = Regex("""\d+(\.\d+)?""")
+
+    private fun firstNumber(text: String): Number? =
+        NUMBER.find(text)?.value?.let { it.toIntOrNull() ?: it.toDouble() }
 }

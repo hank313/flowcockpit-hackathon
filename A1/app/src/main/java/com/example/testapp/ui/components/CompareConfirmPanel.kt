@@ -94,12 +94,13 @@ private fun CompareColumn(
                 maxLines = 2,
                 overflow = TextOverflow.Ellipsis,
             )
-            if (card == null || card.attributes.isEmpty()) {
+            if (card == null || (card.attributes.isEmpty() && card.tags.isEmpty())) {
                 AttributeChip(describeAttribute("屬性", null))
             } else {
                 card.attributes.forEach { (key, value) ->
                     AttributeChip(describeAttribute(key, value))
                 }
+                card.tags.forEach { AttributeChip(AttributeText(it, ChipTone.Neutral)) }
             }
         }
     }

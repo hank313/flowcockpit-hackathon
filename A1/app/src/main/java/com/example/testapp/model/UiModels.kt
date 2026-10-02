@@ -22,6 +22,7 @@ sealed interface UiComponent {
     data class ConditionControl(
         override val id: String,
         val filters: Map<String, Any?>,
+        val labels: Map<String, String> = emptyMap(),
     ) : UiComponent
 
     data class CandidateCard(
@@ -30,6 +31,7 @@ sealed interface UiComponent {
         val name: String?,
         val attributes: Map<String, Any?>,
         val selected: Boolean,
+        val tags: List<String> = emptyList(),
     ) : UiComponent
 
     data class CompareConfirmPanel(
@@ -43,27 +45,28 @@ sealed interface UiComponent {
     data class Unsupported(override val id: String, val type: String) : UiComponent
 }
 
-/** A1 元件產生的使用者操作,由 A2 包成 user_action 送給 AI Box */
+/** A1 元件產生的使用者操作,由 A2 包成 TOUCH_ACTION 送給 D */
 sealed interface UserAction {
     fun toPayload(): JSONObject
 
     data class SelectCandidate(val candidateId: String) : UserAction {
         override fun toPayload(): JSONObject = JSONObject()
-            .put("action", "select_candidate")
-            .put("candidate_id", candidateId)
+            .put("action", "SELECT_CANDIDATE")
+            .put("candidate_id", candidateIdJson(candidateId))
     }
 
-    // update_condition / confirm 的 payload 欄位尚未在規範中定案,需與 D 對齊
     data class UpdateCondition(val key: String, val value: Any?) : UserAction {
         override fun toPayload(): JSONObject = JSONObject()
-            .put("action", "update_condition")
-            .put("key", key)
-            .put("value", value ?: JSONObject.NULL)
+            .put("action", "UPDATE_FILTER")
+            .put("filters", JSONObject().put(key, value ?: JSONObject.NULL))
     }
 
     data class Confirm(val candidateId: String) : UserAction {
         override fun toPayload(): JSONObject = JSONObject()
-            .put("action", "confirm")
-            .put("candidate_id", candidateId)
+            .put("action", "CONFIRM_DESTINATION")
+            .put("candidate_id", candidateIdJson(candidateId))
     }
 }
+
+// D 的地點 id 是整數
+private fun candidateIdJson(id: String): Any = id.toIntOrNull() ?: id

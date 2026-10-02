@@ -10,7 +10,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Modifier
-import com.example.testapp.data.FakeAiBox
+import com.example.testapp.data.AssetJsonAiBox
 import com.example.testapp.ui.screens.CockpitController
 import com.example.testapp.ui.screens.CockpitScreen
 import com.example.testapp.ui.theme.TestAPPTheme
@@ -23,7 +23,9 @@ class MainActivity : ComponentActivity() {
             TestAPPTheme {
                 val scope = rememberCoroutineScope()
                 // TODO(A2): 換成 WebSocket 實作的 AiBoxGateway
-                val controller = remember { CockpitController(FakeAiBox(scope), scope) }
+                val controller = remember {
+                    CockpitController(AssetJsonAiBox(applicationContext, scope), scope)
+                }
                 Surface(Modifier.fillMaxSize()) {
                     CockpitScreen(controller, Modifier.safeDrawingPadding())
                 }

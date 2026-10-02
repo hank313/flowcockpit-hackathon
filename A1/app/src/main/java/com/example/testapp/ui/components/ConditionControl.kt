@@ -21,7 +21,21 @@ import com.example.testapp.model.UiComponent
 import com.example.testapp.model.UserAction
 import com.example.testapp.ui.theme.TestAPPTheme
 
-private val DRIVE_DISTANCE_OPTIONS = listOf(1000, 3000, 5000, 10000)
+private val STEP_OPTIONS: Map<String, List<Number>> = mapOf(
+    "max_drive_distance_m" to listOf(1000, 3000, 5000, 10000),
+    "max_drive_min" to listOf(5, 10, 15, 20),
+    "max_drive_km" to listOf(1, 3, 5, 10),
+)
+
+private fun formatStep(key: String, value: Number): String {
+    val d = value.toDouble()
+    val n = if (d % 1.0 == 0.0) d.toInt().toString() else d.toString()
+    return when (key) {
+        "max_drive_distance_m" -> formatDistance(value.toInt())
+        "max_drive_min" -> "$n 分鐘"
+        else -> "$n km"
+    }
+}
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
@@ -49,9 +63,8 @@ fun ConditionControlView(
                 )
             }
 
-            val (distanceFilters, otherFilters) = data.filters.entries.partition {
-                it.key == "max_drive_distance_m"
-            }
+            val (stepFilters, otherFilters) = data.filters.entries.partition { it.key in STEP_OPTIONS }
+            fun label(key: String) = data.labels[key] ?: filterName(key)
 
             FlowRow(
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -59,27 +72,27 @@ fun ConditionControlView(
             ) {
                 otherFilters.forEach { (key, value) ->
                     when (value) {
-                        is Boolean, null -> BooleanFilterChip(key, value as Boolean?, onAction)
+                        is Boolean, null -> BooleanFilterChip(key, label(key), value as Boolean?, onAction)
                         else -> AttributeChip(describeAttribute(key, value))
                     }
                 }
             }
 
-            distanceFilters.forEach { (key, value) ->
-                DistanceSelector(key, (value as? Number)?.toInt(), onAction)
+            stepFilters.forEach { (key, value) ->
+                StepSelector(key, label(key), value as? Number, onAction)
             }
         }
     }
 }
 
 @Composable
-private fun BooleanFilterChip(key: String, value: Boolean?, onAction: (UserAction) -> Unit) {
+private fun BooleanFilterChip(key: String, label: String, value: Boolean?, onAction: (UserAction) -> Unit) {
     FilterChip(
         selected = value == true,
         onClick = { onAction(UserAction.UpdateCondition(key, value != true)) },
         label = {
             Text(
-                text = if (value == null) "${filterName(key)}(未知)" else filterName(key),
+                text = if (value == null) "$label(未知)" else label,
                 style = MaterialTheme.typography.labelLarge,
             )
         },
@@ -92,20 +105,22 @@ private fun BooleanFilterChip(key: String, value: Boolean?, onAction: (UserActio
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun DistanceSelector(key: String, current: Int?, onAction: (UserAction) -> Unit) {
+private fun StepSelector(key: String, label: String, current: Number?, onAction: (UserAction) -> Unit) {
     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
         Text(
-            text = if (current == null) "行駛距離上限:未知" else "行駛距離上限:${formatDistance(current)}",
+            text = if (current == null) "$label:未知" else "$label:${formatStep(key, current)}",
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
         FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            val options = (DRIVE_DISTANCE_OPTIONS + listOfNotNull(current)).distinct().sorted()
-            options.forEach { meters ->
+            val options = (STEP_OPTIONS.getValue(key) + listOfNotNull(current))
+                .distinctBy { it.toDouble() }
+                .sortedBy { it.toDouble() }
+            options.forEach { option ->
                 FilterChip(
-                    selected = meters == current,
-                    onClick = { onAction(UserAction.UpdateCondition(key, meters)) },
-                    label = { Text(formatDistance(meters), style = MaterialTheme.typography.labelLarge) },
+                    selected = option.toDouble() == current?.toDouble(),
+                    onClick = { onAction(UserAction.UpdateCondition(key, option)) },
+                    label = { Text(formatStep(key, option), style = MaterialTheme.typography.labelLarge) },
                     colors = FilterChipDefaults.filterChipColors(
                         selectedContainerColor = MaterialTheme.colorScheme.primary,
                         selectedLabelColor = MaterialTheme.colorScheme.onPrimary,

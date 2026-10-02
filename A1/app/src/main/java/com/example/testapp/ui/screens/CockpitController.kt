@@ -71,7 +71,7 @@ class CockpitController(
 
     private fun onMessage(json: String) {
         val envelope = UiJsonParser.parseEnvelope(json) ?: return
-        if (envelope.type != "ui_update") return
+        if (!envelope.type.equals("ui_update", ignoreCase = true)) return
         // 同一任務中版本較舊(或重複)的訊息一律丟棄
         if (envelope.taskId == taskId && envelope.version <= version) return
         taskId = envelope.taskId

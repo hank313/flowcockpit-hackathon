@@ -77,12 +77,13 @@ fun CandidateCardView(
                     horizontalArrangement = Arrangement.spacedBy(6.dp),
                     verticalArrangement = Arrangement.spacedBy(6.dp),
                 ) {
-                    if (data.attributes.isEmpty()) {
+                    if (data.attributes.isEmpty() && data.tags.isEmpty()) {
                         AttributeChip(describeAttribute("屬性", null))
                     }
                     data.attributes.forEach { (key, value) ->
                         AttributeChip(describeAttribute(key, value))
                     }
+                    data.tags.forEach { AttributeChip(AttributeText(it, ChipTone.Neutral)) }
                 }
             }
             Button(

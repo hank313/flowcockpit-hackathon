@@ -34,19 +34,50 @@ Android HMI App  ←Ethernet/WebSocket→  AI Box(Python)  ←(連網時)→  Cl
 
 負責範圍:候選卡片、條件控制、比較與確認面板三類 Compose 元件,以及依 JSON 決定渲染哪個元件的渲染器。
 
-**進度**:三類元件、渲染器、澄清問題UI 已完成;目前用假後端 `FakeAiBox` 依下方定案格式送 `ui_update` 做開發與展示。
+**進度**(2026/10/2):
+- 已完成:三類元件、渲染器、澄清問題 UI
+- 已完成:改為依 **D 實際輸出的格式**渲染(見 `d/README.md`、`d/mock_ui_payload.json`),下方「D → A1」舊規範格式也仍可解析
+- 已完成:用 D 實際輸出(`d/test_client.py` 取得的 JSON)驗證可正確顯示
+- 已完成:觸控事件已接好,切換條件、選車程範圍、選候選、確認都會產生 D 格式的 action
+- 進行中:尚未接 WebSocket(交給 A2),目前用本地 JSON 檔測試,因此觸控後畫面不會變化
 
 **程式位置**(`A1/app/src/main/java/com/example/testapp/`):
 - `model/UiModels.kt`:JSON 對應的資料結構(`Envelope`、`UiComponent`、`UserAction`)
-- `model/UiJsonParser.kt`:容錯解析,欄位缺漏時顯示「未知」,未知的 `type` 略過不 crash
-- `data/AiBoxGateway.kt`:A1 與 AI Box 的介面,**A2 請以 WebSocket 實作此介面取代 `FakeAiBox`**
-- `data/FakeAiBox.kt`:假後端,可當完整 JSON 範例參考
+- `model/UiJsonParser.kt`:容錯解析,元件有 `component` 欄位走 D 格式、有 `type` 欄位走舊規範;欄位缺漏顯示「未知」,未知元件略過不 crash
+- `data/AiBoxGateway.kt`:A1 與 AI Box 的介面,**A2 請以 WebSocket 實作此介面取代 `AssetJsonAiBox`**
+- `data/AssetJsonAiBox.kt`:目前使用中,從 `A1/app/src/main/assets/ui/*.json` 依檔名順序讀取,每次放開麥克風送出下一份(同一 `task_id` 的 `version` 需遞增,否則會被丟棄)
+- `data/FakeAiBox.kt`:舊規範格式的假後端,保留參考
 
-**A1 認得的條件/屬性 key**:見下方「D → A1」的欄位表
+**A1 對 D 格式的對應**:
+- `filter_controls` → 條件控制;`TOGGLE` 顯示為開關,`max_drive_min` 顯示為 5 / 10 / 15 / 20 分鐘選項(`"<= 10 分鐘"` 這類字串會取出數字)
+- `candidate_list` → 每個 item 一張候選卡片;`drive_distance_desc`、`drive_eta_desc`、`tags` 顯示為標籤,`selected_id` 對應的卡片反白
+- `comparison_panel` → 比較面板;顯示 `selected_id` 對應的地點與 `cloud_enhanced_text`,`status` 為 `CONFIRMED` 時停用確認
+- 外層 `type` 接受 `UI_UPDATE`(不分大小寫)
+
+**A1 送出的 payload**(A2 包成 `TOUCH_ACTION` 送給 D,`candidate_id` 為整數):
+
+```json
+{ "action": "SELECT_CANDIDATE", "candidate_id": 2 }
+{ "action": "UPDATE_FILTER", "filters": { "max_drive_min": 15 } }
+{ "action": "CONFIRM_DESTINATION", "candidate_id": 2 }
+```
+
+**交給 A2 的接入方式**:
+- 實作 `AiBoxGateway`,連 `ws://<AI Box IP>:8000/ws`(模擬器連本機用 `10.0.2.2`)
+- 收到的文字直接 emit 到 `messages`,A1 會自行解析與做版本比對
+- `sendAction()`:包成 `{"task_id","version","type":"TOUCH_ACTION","payload": action.toPayload()}`
+- 重連或恢復時送 `{"task_id","type":"SYNC_REQUEST"}` 取回最新狀態
+- 需加 `INTERNET` 權限,並以 `network_security_config` 只對 AI Box IP 開放 `ws://` 明文連線
+- 在 `MainActivity.kt` 把 `AssetJsonAiBox` 換成 WebSocket 實作
+
+**已決定**:
+- 車程條件以**分鐘**(`max_drive_min`)為準,不使用公里
 
 **待對齊**:
-- 距離欄位:原共用規範用 `walk_distance_m` / `max_walk_distance_m`(步行),A1 改用 `drive_distance_m` / `max_drive_distance_m`(行駛),需 BC、D、E 配合
-- `update_condition`、`confirm` 的 payload 欄位(見下方 WebSocket 區塊)需與 D 確認
+- D 格式沒有 `clarification_needed`,澄清問題 UI 目前不會出現(需 D 補欄位)
+- D 的 STEPPER `value` 建議改傳數字(例如 `10`),顯示文字放 `label`
+- 按「確認」後 D 會廣播 `CONFIRMED` 的 UI,面板會再次滑出(確認鈕停用);是否改為確認後不再顯示,需與 A2 討論
+- 下方「共用規範」的 D → A1、WebSocket 區塊仍是舊格式,與 D 實作不同,建議由 D 更新為實際格式
 
 ### A2 — Android 互動邏輯、狀態管理與多螢幕
 

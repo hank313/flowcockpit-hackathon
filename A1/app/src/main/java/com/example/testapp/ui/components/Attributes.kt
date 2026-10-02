@@ -16,11 +16,13 @@ private const val UNKNOWN = "未知"
 /** 篩選條件/屬性 key 的中文名稱;未列出的 key 直接顯示原字串 */
 internal fun filterName(key: String): String = when (key) {
     "indoor" -> "室內"
-    "has_seating" -> "有座位"
+    "has_seating", "seating" -> "有座位"
     "has_food" -> "有餐飲"
-    "max_drive_distance_m" -> "行駛距離"
+    "max_drive_distance_m" -> "行駛距離上限"
     "drive_distance_m" -> "行駛距離"
     "drive_time_min" -> "車程"
+    "max_drive_min" -> "車程上限"
+    "max_drive_km" -> "行駛距離上限"
     else -> key
 }
 
@@ -32,7 +34,7 @@ internal fun describeAttribute(key: String, value: Any?): AttributeText {
     if (value == null) return AttributeText("${filterName(key)} $UNKNOWN", ChipTone.Unknown)
     return when (key) {
         "indoor" -> boolText(value, "室內", "戶外")
-        "has_seating" -> boolText(value, "有座位", "無座位")
+        "has_seating", "seating" -> boolText(value, "有座位", "無座位")
         "has_food" -> boolText(value, "有餐飲", "無餐飲")
         "drive_distance_m", "max_drive_distance_m" -> (value as? Number)
             ?.let { AttributeText("行駛 ${formatDistance(it.toInt())}", ChipTone.Neutral) }
