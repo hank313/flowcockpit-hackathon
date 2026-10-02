@@ -4,13 +4,13 @@ import sqlite3
 import time
 from typing import Any, Dict, List, Optional
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-import uvicorn
 from fastapi.responses import HTMLResponse
+import uvicorn
 
 DB_PATH = "flowcockpit.db"
 
 # ==========================================
-# 1. 資料庫初始化 (示範資料與任務狀態表)
+# 1. 資料庫初始化 (改為行駛距離與時間)
 # ==========================================
 def init_db():
     conn = sqlite3.connect(DB_PATH)
@@ -23,13 +23,13 @@ def init_db():
         name TEXT NOT NULL,
         is_indoor INTEGER NOT NULL,      -- 1: 室內, 0: 室外
         has_seating INTEGER NOT NULL,    -- 1: 有座, 0: 無座
-        walk_minutes INTEGER NOT NULL,   -- 步行分鐘
-        drive_minutes INTEGER NOT NULL,  -- 開車/行程時間
+        drive_km REAL NOT NULL,          -- 行駛距離 (公里)
+        drive_minutes INTEGER NOT NULL,  -- 行駛時間 (分鐘)
         tags TEXT NOT NULL               -- 逗號分隔標籤
     )
     """)
 
-    # 任務狀態表 (支援中斷恢復與版本追蹤)
+    # 任務狀態表
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS task_states (
         task_id TEXT PRIMARY KEY,
@@ -38,7 +38,7 @@ def init_db():
         candidate_ids_json TEXT NOT NULL,
         selected_id INTEGER,
         comparison_text TEXT,
-        status TEXT NOT NULL,            -- 'IN_PROGRESS', 'CONFIRMED'
+        status TEXT NOT NULL,
         updated_at REAL NOT NULL
     )
     """)
@@ -47,14 +47,14 @@ def init_db():
     cursor.execute("SELECT COUNT(*) FROM pois")
     if cursor.fetchone()[0] == 0:
         sample_pois = [
-            (1, "星巴克 國道門市", 1, 1, 2, 5, "室內,空調,咖啡,有插座"),
-            (2, "全家便利商店 休息站店", 1, 1, 1, 3, "室內,便利店,輕食,有座位"),
-            (3, "林間步道觀景涼亭", 0, 1, 8, 12, "戶外,通風,風景好,有長椅"),
-            (4, "國道服務區 主建築美食街", 1, 1, 3, 6, "室內,熱食,座位多,洗手間"),
-            (5, "得來速 快速取餐點", 0, 0, 0, 4, "免下車,快速,外帶"),
-            (6, "露天景觀咖啡座", 0, 1, 5, 10, "戶外遮陽,有座位,氣氛佳"),
-            (7, "綠能生態停車休憩區", 0, 0, 1, 2, "戶外,停車方便,活動筋骨"),
-            (8, "24H 自助圖書休息站", 1, 1, 4, 8, "室內安靜,冷氣,閱讀區,充電")
+            (1, "星巴克 國道門市", 1, 1, 2.5, 4, "室內,空調,咖啡,有插座"),
+            (2, "全家便利商店 休息站店", 1, 1, 1.2, 2, "室內,便利店,輕食,有座位"),
+            (3, "林間步道觀景涼亭", 0, 1, 6.8, 11, "戶外,通風,風景好,有長椅"),
+            (4, "國道服務區 主建築美食街", 1, 1, 3.0, 5, "室內,熱食,座位多,洗手間"),
+            (5, "得來速 快速取餐點", 0, 0, 2.0, 3, "免下車,快速,外帶"),
+            (6, "露天景觀咖啡座", 0, 1, 7.5, 12, "戶外遮陽,有座位,氣氛佳"),
+            (7, "綠能生態停車休憩區", 0, 0, 1.0, 2, "戶外,停車方便,活動筋骨"),
+            (8, "24H 自助圖書休息站", 1, 1, 4.5, 7, "室內安靜,冷氣,閱讀區,充電")
         ]
         cursor.executemany(
             "INSERT INTO pois VALUES (?, ?, ?, ?, ?, ?, ?)", sample_pois
@@ -79,7 +79,7 @@ class StateManager:
         row = cursor.fetchone()
         
         if not row:
-            initial_filters = {"indoor": True, "seating": True, "max_walk_min": 10}
+            initial_filters = {"indoor": True, "seating": True, "max_drive_min": 10}
             candidates = StateManager.query_candidates(conn, initial_filters)
             cursor.execute("""
                 INSERT INTO task_states VALUES (?, ?, ?, ?, ?, ?, ?, ?)
@@ -116,9 +116,15 @@ class StateManager:
             query += " AND has_seating = ?"
             params.append(1 if filters["seating"] else 0)
 
-        if "max_walk_min" in filters:
-            query += " AND walk_minutes <= ?"
-            params.append(filters["max_walk_min"])
+        # 改以最大行駛時間過濾
+        if "max_drive_min" in filters:
+            query += " AND drive_minutes <= ?"
+            params.append(filters["max_drive_min"])
+
+        # 或支援最大行駛里程過濾
+        if "max_drive_km" in filters:
+            query += " AND drive_km <= ?"
+            params.append(filters["max_drive_km"])
 
         cursor = conn.cursor()
         cursor.execute(query, params)
@@ -131,7 +137,7 @@ class StateManager:
                 "name": r[1],
                 "is_indoor": bool(r[2]),
                 "has_seating": bool(r[3]),
-                "walk_minutes": r[4],
+                "drive_km": r[4],
                 "drive_minutes": r[5],
                 "tags": r[6].split(",")
             })
@@ -162,12 +168,11 @@ class StateManager:
         current_comp_text = row["comparison_text"]
         current_status = row["status"]
 
-        # 更新條件與候選
         if new_filters:
             current_filters.update(new_filters)
             new_candidates = StateManager.query_candidates(conn, current_filters)
             current_candidate_ids = [c["id"] for c in new_candidates]
-            current_ver += 1  # 狀態改變，版號累加
+            current_ver += 1
 
         if selected_id is not None:
             current_selected = selected_id
@@ -201,7 +206,7 @@ class StateManager:
         return StateManager.get_or_create_task(task_id)
 
 # ==========================================
-# 3. 生成式 UI 組裝器 (符合 A1 規範)
+# 3. 生成式 UI 組裝器 (A1 JSON 規範)
 # ==========================================
 class UIGenerator:
     @staticmethod
@@ -209,7 +214,6 @@ class UIGenerator:
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
 
-        # 查出當前 candidate_ids 的詳細資訊
         candidate_ids = task["candidate_ids"]
         candidates = []
         if candidate_ids:
@@ -220,8 +224,8 @@ class UIGenerator:
                     "id": r[0],
                     "name": r[1],
                     "tags": r[6].split(","),
-                    "distance_desc": f"步行約 {r[4]} 分鐘",
-                    "eta_desc": f"車程約 {r[5]} 分鐘"
+                    "drive_distance_desc": f"行駛距離 {r[4]} 公里",
+                    "drive_eta_desc": f"行駛時間約 {r[5]} 分鐘"
                 })
         conn.close()
 
@@ -233,7 +237,7 @@ class UIGenerator:
                     "filters": [
                         {"id": "indoor", "label": "室內空間", "value": filters.get("indoor", True), "type": "TOGGLE"},
                         {"id": "seating", "label": "有座位", "value": filters.get("seating", True), "type": "TOGGLE"},
-                        {"id": "max_walk_min", "label": "步行範圍", "value": f"<= {filters.get('max_walk_min', 10)} 分鐘", "type": "STEPPER"}
+                        {"id": "max_drive_min", "label": "車程範圍", "value": f"<= {filters.get('max_drive_min', 10)} 分鐘", "type": "STEPPER"}
                     ]
                 }
             },
@@ -246,7 +250,6 @@ class UIGenerator:
             }
         ]
 
-        # 雲端比較文字或完成狀態
         if task.get("comparison_text") or task.get("status") == "CONFIRMED":
             ui_components.append({
                 "component": "comparison_panel",
@@ -270,7 +273,7 @@ class UIGenerator:
         }
 
 # ==========================================
-# 4. FastAPI & WebSocket 管理
+# 4. FastAPI & WebSocket
 # ==========================================
 app = FastAPI()
 
@@ -294,14 +297,18 @@ manager = ConnectionManager()
 
 @app.get("/", response_class=HTMLResponse)
 async def get_demo_dashboard():
-    with open("dashboard.html", "r", encoding="utf-8") as f:
-        return f.read()
+    # 支援專案根目錄或 d 資料夾啟動
+    try:
+        with open("dashboard.html", "r", encoding="utf-8") as f:
+            return f.read()
+    except FileNotFoundError:
+        with open("d/dashboard.html", "r", encoding="utf-8") as f:
+            return f.read()
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     await manager.connect(websocket)
     try:
-        # 連線建立時，先下發目前的任務最新狀態
         current_task = StateManager.get_or_create_task("demo_task_001")
         initial_ui = UIGenerator.build_ui_json(current_task)
         await websocket.send_text(json.dumps(initial_ui, ensure_ascii=False))
@@ -314,7 +321,6 @@ async def websocket_endpoint(websocket: WebSocket):
             payload = data.get("payload", {})
             task_id = data.get("task_id", "demo_task_001")
 
-            # 情況 A：A2 傳來的觸控操作 (TOUCH_ACTION)
             if msg_type == "TOUCH_ACTION":
                 action = payload.get("action")
                 if action == "SELECT_CANDIDATE":
@@ -328,7 +334,6 @@ async def websocket_endpoint(websocket: WebSocket):
 
                 await manager.broadcast(UIGenerator.build_ui_json(task))
 
-            # 情況 B：A2 重新上線要資料 (STATE_REQ / 中斷恢復)
             elif msg_type == "SYNC_REQUEST":
                 task = StateManager.get_or_create_task(task_id)
                 await websocket.send_text(json.dumps(UIGenerator.build_ui_json(task), ensure_ascii=False))
@@ -340,11 +345,10 @@ async def websocket_endpoint(websocket: WebSocket):
         manager.disconnect(websocket)
 
 # ==========================================
-# 5. 提供給 BC (本地 AI) 與 E (雲端) 呼叫的內部 API
+# 5. 提供給 BC 與 E 的內部 API
 # ==========================================
 @app.post("/internal/apply_bc_filters")
 async def apply_bc_filters(req: Dict[str, Any]):
-    """BC 抽取出的條件由此注入 (e.g. {"indoor": True, "seating": True})"""
     task_id = req.get("task_id", "demo_task_001")
     filters = req.get("filters", {})
     task = StateManager.update_task_state(task_id, new_filters=filters)
@@ -354,13 +358,11 @@ async def apply_bc_filters(req: Dict[str, Any]):
 
 @app.post("/internal/apply_cloud_comparison")
 async def apply_cloud_comparison(req: Dict[str, Any]):
-    """E 取得 Claude API 結論後由此注入，附帶過期防護"""
     task_id = req.get("task_id", "demo_task_001")
     req_version = req.get("base_version")
     comp_text = req.get("comparison_text", "")
 
     task = StateManager.get_or_create_task(task_id)
-    # 過期檢查：如果當前版號已經超前，捨棄此雲端回覆
     if req_version and req_version < task["version"]:
         return {"status": "discarded", "reason": "stale_version"}
 
