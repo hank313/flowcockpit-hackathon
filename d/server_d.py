@@ -12,22 +12,24 @@ import uvicorn
 
 DB_PATH = "flowcockpit.db"
 
-# BC 模組服務位址 (BC 啟動時請帶 --port 8001)
+# BC 與 E 模組端點設定
 BC_API_URL = os.getenv("BC_API_URL", "http://127.0.0.1:8001")
-# E 模組 (雲端增強) 位址
 CLOUD_API_URL = os.getenv("CLOUD_API_URL", "http://127.0.0.1:8002")
 
 # ==========================================
-# 1. 資料庫初始化 (支援儲存外部動態 POI)
+# 1. 資料庫初始化 (移除假資料，僅儲存狀態)
 # ==========================================
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    # 只保留任務狀態表，地點完全交由 BC 模組提供
+
+    # 任務狀態表 (持久化任務、意圖、篩選條件與動態候選名單)
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS task_states (
         task_id TEXT PRIMARY KEY,
         version INTEGER NOT NULL,
+        intent TEXT,
+        raw_text TEXT,
         filters_json TEXT NOT NULL,
         candidates_json TEXT NOT NULL,
         selected_id TEXT,
@@ -56,25 +58,11 @@ class StateManager:
         
         if not row:
             initial_filters = {"indoor": True, "seating": True, "max_drive_min": 10}
-            # 預設自本地備用資料撈取
-            cursor.execute("SELECT * FROM pois WHERE is_indoor=1 LIMIT 4")
-            raw_pois = cursor.fetchall()
-            initial_candidates = []
-            for r in raw_pois:
-                initial_candidates.append({
-                    "id": str(r[0]),
-                    "name": r[1],
-                    "tags": r[6].split(","),
-                    "drive_distance_desc": f"行駛距離 {r[4]} 公里",
-                    "drive_eta_desc": f"行駛時間約 {r[5]} 分鐘"
-                })
-
             cursor.execute("""
-                INSERT INTO task_states VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO task_states VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
-                task_id, 1, json.dumps(initial_filters),
-                json.dumps(initial_candidates, ensure_ascii=False),
-                None, "", "IN_PROGRESS", time.time()
+                task_id, 1, "search_rest_stop", "", json.dumps(initial_filters),
+                json.dumps([]), None, "", "IN_PROGRESS", time.time()
             ))
             conn.commit()
             cursor.execute("SELECT * FROM task_states WHERE task_id = ?", (task_id,))
@@ -89,6 +77,8 @@ class StateManager:
     @staticmethod
     def update_task_state(
         task_id: str,
+        intent: Optional[str] = None,
+        raw_text: Optional[str] = None,
         new_filters: Optional[Dict[str, Any]] = None,
         new_candidates: Optional[List[Dict[str, Any]]] = None,
         selected_id: Optional[str] = None,
@@ -105,54 +95,38 @@ class StateManager:
             conn.close()
             return StateManager.get_or_create_task(task_id)
 
-        current_ver = row["version"]
+        current_ver = row["version"] + 1
+        current_intent = intent if intent is not None else row["intent"]
+        current_raw_text = raw_text if raw_text is not None else row["raw_text"]
+        
         current_filters = json.loads(row["filters_json"])
-        current_candidates = json.loads(row["candidates_json"])
-        current_selected = row["selected_id"]
-        current_comp_text = row["comparison_text"]
-        current_status = row["status"]
-
-        if new_filters is not None:
+        if new_filters:
             current_filters.update(new_filters)
-            current_ver += 1
 
-        if new_candidates is not None:
-            current_candidates = new_candidates
-            current_ver += 1
-
-        if selected_id is not None:
-            current_selected = str(selected_id)
-            current_ver += 1
-
-        if comparison_text is not None:
-            current_comp_text = comparison_text
-            current_ver += 1
-
-        if status:
-            current_status = status
-            current_ver += 1
+        current_candidates = new_candidates if new_candidates is not None else json.loads(row["candidates_json"])
+        current_selected = selected_id if selected_id is not None else row["selected_id"]
+        current_comp_text = comparison_text if comparison_text is not None else row["comparison_text"]
+        current_status = status if status is not None else row["status"]
 
         cursor.execute("""
             UPDATE task_states
-            SET version = ?, filters_json = ?, candidates_json = ?, 
-                selected_id = ?, comparison_text = ?, status = ?, updated_at = ?
+            SET version = ?, intent = ?, raw_text = ?, filters_json = ?, 
+                candidates_json = ?, selected_id = ?, comparison_text = ?, 
+                status = ?, updated_at = ?
             WHERE task_id = ?
         """, (
-            current_ver,
+            current_ver, current_intent, current_raw_text,
             json.dumps(current_filters, ensure_ascii=False),
             json.dumps(current_candidates, ensure_ascii=False),
-            current_selected,
-            current_comp_text,
-            current_status,
-            time.time(),
-            task_id
+            current_selected, current_comp_text, current_status,
+            time.time(), task_id
         ))
         conn.commit()
         conn.close()
         return StateManager.get_or_create_task(task_id)
 
 # ==========================================
-# 3. 生成式 UI 組裝器
+# 3. 生成式 UI 組裝器 (A1 JSON 規範)
 # ==========================================
 class UIGenerator:
     @staticmethod
@@ -162,6 +136,7 @@ class UIGenerator:
             {
                 "component": "filter_controls",
                 "data": {
+                    "raw_text": task.get("raw_text", ""),
                     "filters": [
                         {"id": "indoor", "label": "室內空間", "value": filters.get("indoor", True), "type": "TOGGLE"},
                         {"id": "seating", "label": "有座位", "value": filters.get("seating", True), "type": "TOGGLE"},
@@ -173,7 +148,7 @@ class UIGenerator:
                 "component": "candidate_list",
                 "data": {
                     "selected_id": task["selected_id"],
-                    "items": task["candidates"]  # 直接取用動態更新的候選地點
+                    "items": task["candidates"]
                 }
             }
         ]
@@ -272,123 +247,126 @@ async def websocket_endpoint(websocket: WebSocket):
         manager.disconnect(websocket)
 
 # ==========================================
-# 5. 端到端音訊/意圖/離線優先整合
+# 5. 端到端流程：HMI -> BC (/api/intent) -> 雲端 AI (E)
 # ==========================================
 
-def convert_bc_places_to_candidates(bc_places: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """將 BC 回傳的真實雲林地點，轉為符合 UI JSON 規範的行駛資訊結構"""
-    candidates = []
-    for idx, p in enumerate(bc_places):
-        dist_m = p.get("distance_m") or 2000.0
-        # 大圓距離換算預估行駛公里與時間
-        drive_km = round((dist_m * 1.35) / 1000.0, 1)
-        drive_min = max(2, math.ceil(drive_km / 35.0 * 60))
-
-        tags = [p.get("district", "雲林")]
-        matched = p.get("matched_tags", {})
-        if matched.get("amenity"): tags.append(matched["amenity"])
-        if matched.get("bench") == "yes": tags.append("有長椅")
-
-        candidates.append({
-            "id": p.get("osm_id", str(idx + 1)),
-            "name": p.get("name", "推薦休息點"),
-            "tags": tags,
-            "drive_distance_desc": f"行駛距離 {drive_km} 公里",
-            "drive_eta_desc": f"行駛時間約 {drive_min} 分鐘",
-            "latitude": p.get("latitude"),
-            "longitude": p.get("longitude"),
-            "address": p.get("address", "")
-        })
-    return candidates
-
-async def trigger_cloud_enhancement(task_id: str, base_version: int, candidates: List[Dict[str, Any]]):
-    """雲端非同步增強 (斷網自動跳過，不卡住本地操作)"""
+async def query_cloud_ai_for_places(task_id: str, base_version: int, intent_info: Dict[str, Any]):
+    """將 BC 抽出的意圖與經緯度發送給雲端 AI 尋找推薦地點及決策說明"""
     try:
-        async with httpx.AsyncClient(timeout=6.0) as client:
+        async with httpx.AsyncClient(timeout=10.0) as client:
             res = await client.post(
-                f"{CLOUD_API_URL}/api/cloud_compare",
-                json={"task_id": task_id, "base_version": base_version, "candidates": candidates}
+                f"{CLOUD_API_URL}/api/cloud_search_places",
+                json={
+                    "task_id": task_id,
+                    "base_version": base_version,
+                    "intent": intent_info.get("intent"),
+                    "raw_text": intent_info.get("raw_text"),
+                    "conditions": intent_info.get("conditions", {}),
+                    "latitude": intent_info.get("latitude"),
+                    "longitude": intent_info.get("longitude")
+                }
             )
             if res.status_code == 200:
                 cloud_data = res.json()
-                comp_text = cloud_data.get("comparison_text", "")
-                await apply_cloud_comparison({
-                    "task_id": task_id,
-                    "base_version": base_version,
-                    "comparison_text": comp_text
-                })
-    except Exception:
-        # 完全離線時正常略過，維持本地 AI 結果
-        pass
+                new_candidates = cloud_data.get("candidates", [])
+                comparison_text = cloud_data.get("comparison_text", "")
+                
+                # 檢查版本是否過期
+                task = StateManager.get_or_create_task(task_id)
+                if base_version < task["version"]:
+                    return
+
+                updated_task = StateManager.update_task_state(
+                    task_id=task_id,
+                    new_candidates=new_candidates if new_candidates else None,
+                    comparison_text=comparison_text
+                )
+                await manager.broadcast(UIGenerator.build_ui_json(updated_task))
+    except Exception as e:
+        print(f"雲端 AI 呼叫略過 (離線模式或超時): {e}")
 
 @app.post("/api/audio")
 async def handle_audio_pipeline(
     file: UploadFile = File(...),
     task_id: str = Form("demo_task_001"),
-    latitude: Optional[float] = Form(23.71),
-    longitude: Optional[float] = Form(120.54)
+    latitude: Optional[float] = Form(23.718645),
+    longitude: Optional[float] = Form(120.573271),
+    type: Optional[str] = Form(None),
+    target_candidate_id: Optional[str] = Form(None)
 ):
     """
-    接收音訊 -> 送 BC 本地搜尋 -> 立即推播本地真地點 -> 非同步嘗試雲端
+    1. 接收來自 HMI 的語音及座標
+    2. 呼叫 BC 新端點 POST /api/intent 取得 BC -> D JSON
+    3. 更新 D 模組狀態並將意圖與座標轉發雲端 AI
     """
     audio_bytes = await file.read()
-    candidates = []
+    bc_intent_data = {}
 
+    form_data = {
+        "language": "zh",
+        "latitude": latitude,
+        "longitude": longitude
+    }
+    if type:
+        form_data["type"] = type
+    if target_candidate_id:
+        form_data["target_candidate_id"] = target_candidate_id
+
+    # 轉發至 BC 的 POST /api/intent
     try:
-        async with httpx.AsyncClient(timeout=45.0) as client:
-            files = {"file": (file.filename, audio_bytes, file.content_type or "audio/m4a")}
-            data = {"language": "zh", "latitude": latitude, "longitude": longitude, "limit": 5}
-            bc_res = await client.post(f"{BC_API_URL}/api/audio", files=files, data=data)
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            files = {"file": (file.filename, audio_bytes, file.content_type or "audio/wav")}
+            bc_res = await client.post(f"{BC_API_URL}/api/intent", files=files, data=form_data)
             if bc_res.status_code == 200:
-                bc_data = bc_res.json()
-                places = bc_data.get("places", [])
-                candidates = convert_bc_places_to_candidates(places)
+                bc_intent_data = bc_res.json()
     except Exception as e:
-        print(f"呼叫 BC 失敗，使用本地預設: {e}")
+        print(f"呼叫 BC /api/intent 失敗: {e}")
+        bc_intent_data = {
+            "intent": "search_rest_stop",
+            "raw_text": "語音解析失敗，啟動備用語音意圖",
+            "latitude": latitude,
+            "longitude": longitude
+        }
 
-    # 更新任務候選地點並廣播
-    if candidates:
-        task = StateManager.update_task_state(task_id, new_candidates=candidates)
-    else:
-        task = StateManager.get_or_create_task(task_id)
+    # 依 BC 意圖更新任務狀態
+    extracted_conditions = bc_intent_data.get("conditions", {})
+    task = StateManager.update_task_state(
+        task_id=task_id,
+        intent=bc_intent_data.get("intent"),
+        raw_text=bc_intent_data.get("raw_text"),
+        new_filters=extracted_conditions if extracted_conditions else None
+    )
 
+    # 先推播一次 UI 讓 HMI 呈現說明的 raw_text
     ui_json = UIGenerator.build_ui_json(task)
     await manager.broadcast(ui_json)
 
-    # 嘗試連網強化 (離線自動略過)
-    asyncio.create_task(trigger_cloud_enhancement(task_id, task["version"], task["candidates"]))
+    # 帶著 BC 輸出的意圖與經緯度非同步發給雲端 AI
+    asyncio.create_task(query_cloud_ai_for_places(task_id, task["version"], bc_intent_data))
 
-    return {"status": "ok", "task_id": task_id, "version": task["version"], "count": len(task["candidates"])}
-
-@app.post("/api/intent")
-@app.post("/internal/apply_bc_filters")
-async def handle_intent_and_filters(req: Dict[str, Any]):
-    task_id = req.get("task_id", "demo_task_001")
-    # 若直接傳入 BC 的 places 清單
-    if "places" in req:
-        candidates = convert_bc_places_to_candidates(req["places"])
-        task = StateManager.update_task_state(task_id, new_candidates=candidates)
-    else:
-        filters = req.get("filters", {})
-        task = StateManager.update_task_state(task_id, new_filters=filters)
-
-    ui_json = UIGenerator.build_ui_json(task)
-    await manager.broadcast(ui_json)
-
-    asyncio.create_task(trigger_cloud_enhancement(task_id, task["version"], task["candidates"]))
-    return {"status": "ok", "version": task["version"]}
+    return {
+        "status": "ok",
+        "task_id": task_id,
+        "version": task["version"],
+        "bc_intent": bc_intent_data
+    }
 
 @app.post("/internal/apply_cloud_comparison")
 async def apply_cloud_comparison(req: Dict[str, Any]):
     task_id = req.get("task_id", "demo_task_001")
     req_version = req.get("base_version")
     comp_text = req.get("comparison_text", "")
+    new_candidates = req.get("candidates")
 
     task = StateManager.get_or_create_task(task_id)
     if req_version and req_version < task["version"]:
         return {"status": "discarded", "reason": "stale_version"}
 
-    updated_task = StateManager.update_task_state(task_id, comparison_text=comp_text)
+    updated_task = StateManager.update_task_state(
+        task_id=task_id,
+        new_candidates=new_candidates,
+        comparison_text=comp_text
+    )
     await manager.broadcast(UIGenerator.build_ui_json(updated_task))
     return {"status": "applied", "version": updated_task["version"]}
 
