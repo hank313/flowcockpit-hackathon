@@ -1,49 +1,56 @@
 import asyncio
 import json
+import math
+import os
 import sqlite3
 import time
 from typing import Any, Dict, List, Optional
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+import httpx
+from fastapi import FastAPI, File, Form, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse
 import uvicorn
 
 DB_PATH = "flowcockpit.db"
 
+# BC 模組服務位址 (BC 啟動時請帶 --port 8001)
+BC_API_URL = os.getenv("BC_API_URL", "http://127.0.0.1:8001")
+# E 模組 (雲端增強) 位址
+CLOUD_API_URL = os.getenv("CLOUD_API_URL", "http://127.0.0.1:8002")
+
 # ==========================================
-# 1. 資料庫初始化 (改為行駛距離與時間)
+# 1. 資料庫初始化 (支援儲存外部動態 POI)
 # ==========================================
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
 
-    # 示範地點表
+    # 示範/預設地點表 (離線備用)
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS pois (
         id INTEGER PRIMARY KEY,
         name TEXT NOT NULL,
-        is_indoor INTEGER NOT NULL,      -- 1: 室內, 0: 室外
-        has_seating INTEGER NOT NULL,    -- 1: 有座, 0: 無座
-        drive_km REAL NOT NULL,          -- 行駛距離 (公里)
-        drive_minutes INTEGER NOT NULL,  -- 行駛時間 (分鐘)
-        tags TEXT NOT NULL               -- 逗號分隔標籤
+        is_indoor INTEGER NOT NULL,
+        has_seating INTEGER NOT NULL,
+        drive_km REAL NOT NULL,
+        drive_minutes INTEGER NOT NULL,
+        tags TEXT NOT NULL
     )
     """)
 
-    # 任務狀態表
+    # 任務狀態表 (新增動態地點快取動態支援)
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS task_states (
         task_id TEXT PRIMARY KEY,
         version INTEGER NOT NULL,
         filters_json TEXT NOT NULL,
-        candidate_ids_json TEXT NOT NULL,
-        selected_id INTEGER,
+        candidates_json TEXT NOT NULL,     -- 完整儲存當前候選清單物件
+        selected_id TEXT,                  -- 支援數字 ID 或 BC 的 osm_id (字串)
         comparison_text TEXT,
         status TEXT NOT NULL,
         updated_at REAL NOT NULL
     )
     """)
 
-    # 寫入 8 筆情境示範資料 (若無資料)
     cursor.execute("SELECT COUNT(*) FROM pois")
     if cursor.fetchone()[0] == 0:
         sample_pois = [
@@ -56,9 +63,7 @@ def init_db():
             (7, "綠能生態停車休憩區", 0, 0, 1.0, 2, "戶外,停車方便,活動筋骨"),
             (8, "24H 自助圖書休息站", 1, 1, 4.5, 7, "室內安靜,冷氣,閱讀區,充電")
         ]
-        cursor.executemany(
-            "INSERT INTO pois VALUES (?, ?, ?, ?, ?, ?, ?)", sample_pois
-        )
+        cursor.executemany("INSERT INTO pois VALUES (?, ?, ?, ?, ?, ?, ?)", sample_pois)
         conn.commit()
 
     conn.close()
@@ -70,7 +75,7 @@ init_db()
 # ==========================================
 class StateManager:
     @staticmethod
-    def get_or_create_task(task_id: str = "default_task") -> Dict[str, Any]:
+    def get_or_create_task(task_id: str = "demo_task_001") -> Dict[str, Any]:
         conn = sqlite3.connect(DB_PATH)
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
@@ -80,18 +85,25 @@ class StateManager:
         
         if not row:
             initial_filters = {"indoor": True, "seating": True, "max_drive_min": 10}
-            candidates = StateManager.query_candidates(conn, initial_filters)
+            # 預設自本地備用資料撈取
+            cursor.execute("SELECT * FROM pois WHERE is_indoor=1 LIMIT 4")
+            raw_pois = cursor.fetchall()
+            initial_candidates = []
+            for r in raw_pois:
+                initial_candidates.append({
+                    "id": str(r[0]),
+                    "name": r[1],
+                    "tags": r[6].split(","),
+                    "drive_distance_desc": f"行駛距離 {r[4]} 公里",
+                    "drive_eta_desc": f"行駛時間約 {r[5]} 分鐘"
+                })
+
             cursor.execute("""
                 INSERT INTO task_states VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """, (
-                task_id,
-                1,
-                json.dumps(initial_filters),
-                json.dumps([c["id"] for c in candidates]),
-                None,
-                "",
-                "IN_PROGRESS",
-                time.time()
+                task_id, 1, json.dumps(initial_filters),
+                json.dumps(initial_candidates, ensure_ascii=False),
+                None, "", "IN_PROGRESS", time.time()
             ))
             conn.commit()
             cursor.execute("SELECT * FROM task_states WHERE task_id = ?", (task_id,))
@@ -99,55 +111,16 @@ class StateManager:
             
         task = dict(row)
         task["filters"] = json.loads(task["filters_json"])
-        task["candidate_ids"] = json.loads(task["candidate_ids_json"])
+        task["candidates"] = json.loads(task["candidates_json"])
         conn.close()
         return task
-
-    @staticmethod
-    def query_candidates(conn: sqlite3.Connection, filters: Dict[str, Any]) -> List[Dict[str, Any]]:
-        query = "SELECT * FROM pois WHERE 1=1"
-        params = []
-
-        if filters.get("indoor") is not None:
-            query += " AND is_indoor = ?"
-            params.append(1 if filters["indoor"] else 0)
-
-        if filters.get("seating") is not None:
-            query += " AND has_seating = ?"
-            params.append(1 if filters["seating"] else 0)
-
-        # 改以最大行駛時間過濾
-        if "max_drive_min" in filters:
-            query += " AND drive_minutes <= ?"
-            params.append(filters["max_drive_min"])
-
-        # 或支援最大行駛里程過濾
-        if "max_drive_km" in filters:
-            query += " AND drive_km <= ?"
-            params.append(filters["max_drive_km"])
-
-        cursor = conn.cursor()
-        cursor.execute(query, params)
-        rows = cursor.fetchall()
-        
-        results = []
-        for r in rows:
-            results.append({
-                "id": r[0],
-                "name": r[1],
-                "is_indoor": bool(r[2]),
-                "has_seating": bool(r[3]),
-                "drive_km": r[4],
-                "drive_minutes": r[5],
-                "tags": r[6].split(",")
-            })
-        return results
 
     @staticmethod
     def update_task_state(
         task_id: str,
         new_filters: Optional[Dict[str, Any]] = None,
-        selected_id: Optional[int] = None,
+        new_candidates: Optional[List[Dict[str, Any]]] = None,
+        selected_id: Optional[str] = None,
         comparison_text: Optional[str] = None,
         status: Optional[str] = None
     ) -> Dict[str, Any]:
@@ -163,19 +136,21 @@ class StateManager:
 
         current_ver = row["version"]
         current_filters = json.loads(row["filters_json"])
-        current_candidate_ids = json.loads(row["candidate_ids_json"])
+        current_candidates = json.loads(row["candidates_json"])
         current_selected = row["selected_id"]
         current_comp_text = row["comparison_text"]
         current_status = row["status"]
 
-        if new_filters:
+        if new_filters is not None:
             current_filters.update(new_filters)
-            new_candidates = StateManager.query_candidates(conn, current_filters)
-            current_candidate_ids = [c["id"] for c in new_candidates]
+            current_ver += 1
+
+        if new_candidates is not None:
+            current_candidates = new_candidates
             current_ver += 1
 
         if selected_id is not None:
-            current_selected = selected_id
+            current_selected = str(selected_id)
             current_ver += 1
 
         if comparison_text is not None:
@@ -188,13 +163,13 @@ class StateManager:
 
         cursor.execute("""
             UPDATE task_states
-            SET version = ?, filters_json = ?, candidate_ids_json = ?, 
+            SET version = ?, filters_json = ?, candidates_json = ?, 
                 selected_id = ?, comparison_text = ?, status = ?, updated_at = ?
             WHERE task_id = ?
         """, (
             current_ver,
-            json.dumps(current_filters),
-            json.dumps(current_candidate_ids),
+            json.dumps(current_filters, ensure_ascii=False),
+            json.dumps(current_candidates, ensure_ascii=False),
             current_selected,
             current_comp_text,
             current_status,
@@ -206,29 +181,11 @@ class StateManager:
         return StateManager.get_or_create_task(task_id)
 
 # ==========================================
-# 3. 生成式 UI 組裝器 (A1 JSON 規範)
+# 3. 生成式 UI 組裝器
 # ==========================================
 class UIGenerator:
     @staticmethod
     def build_ui_json(task: Dict[str, Any]) -> Dict[str, Any]:
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-
-        candidate_ids = task["candidate_ids"]
-        candidates = []
-        if candidate_ids:
-            placeholders = ",".join("?" * len(candidate_ids))
-            cursor.execute(f"SELECT * FROM pois WHERE id IN ({placeholders})", candidate_ids)
-            for r in cursor.fetchall():
-                candidates.append({
-                    "id": r[0],
-                    "name": r[1],
-                    "tags": r[6].split(","),
-                    "drive_distance_desc": f"行駛距離 {r[4]} 公里",
-                    "drive_eta_desc": f"行駛時間約 {r[5]} 分鐘"
-                })
-        conn.close()
-
         filters = task["filters"]
         ui_components = [
             {
@@ -245,7 +202,7 @@ class UIGenerator:
                 "component": "candidate_list",
                 "data": {
                     "selected_id": task["selected_id"],
-                    "items": candidates
+                    "items": task["candidates"]  # 直接取用動態更新的候選地點
                 }
             }
         ]
@@ -275,7 +232,7 @@ class UIGenerator:
 # ==========================================
 # 4. FastAPI & WebSocket
 # ==========================================
-app = FastAPI()
+app = FastAPI(title="FlowCockpit Backend Module D")
 
 class ConnectionManager:
     def __init__(self):
@@ -291,19 +248,20 @@ class ConnectionManager:
     async def broadcast(self, message: Dict[str, Any]):
         text_data = json.dumps(message, ensure_ascii=False)
         for connection in self.active_connections:
-            await connection.send_text(text_data)
+            try:
+                await connection.send_text(text_data)
+            except Exception:
+                pass
 
 manager = ConnectionManager()
 
 @app.get("/", response_class=HTMLResponse)
 async def get_demo_dashboard():
-    # 支援專案根目錄或 d 資料夾啟動
-    try:
-        with open("dashboard.html", "r", encoding="utf-8") as f:
-            return f.read()
-    except FileNotFoundError:
-        with open("d/dashboard.html", "r", encoding="utf-8") as f:
-            return f.read()
+    for path in ("dashboard.html", "d/dashboard.html"):
+        if os.path.exists(path):
+            with open(path, "r", encoding="utf-8") as f:
+                return f.read()
+    return "<h3>dashboard.html not found</h3>"
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
@@ -324,9 +282,7 @@ async def websocket_endpoint(websocket: WebSocket):
             if msg_type == "TOUCH_ACTION":
                 action = payload.get("action")
                 if action == "SELECT_CANDIDATE":
-                    task = StateManager.update_task_state(task_id, selected_id=payload.get("candidate_id"))
-                elif action == "UPDATE_FILTER":
-                    task = StateManager.update_task_state(task_id, new_filters=payload.get("filters"))
+                    task = StateManager.update_task_state(task_id, selected_id=str(payload.get("candidate_id")))
                 elif action == "CONFIRM_DESTINATION":
                     task = StateManager.update_task_state(task_id, status="CONFIRMED")
                 else:
@@ -345,15 +301,110 @@ async def websocket_endpoint(websocket: WebSocket):
         manager.disconnect(websocket)
 
 # ==========================================
-# 5. 提供給 BC 與 E 的內部 API
+# 5. 端到端音訊/意圖/離線優先整合
 # ==========================================
-@app.post("/internal/apply_bc_filters")
-async def apply_bc_filters(req: Dict[str, Any]):
-    task_id = req.get("task_id", "demo_task_001")
-    filters = req.get("filters", {})
-    task = StateManager.update_task_state(task_id, new_filters=filters)
+
+def convert_bc_places_to_candidates(bc_places: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """將 BC 回傳的真實雲林地點，轉為符合 UI JSON 規範的行駛資訊結構"""
+    candidates = []
+    for idx, p in enumerate(bc_places):
+        dist_m = p.get("distance_m") or 2000.0
+        # 大圓距離換算預估行駛公里與時間
+        drive_km = round((dist_m * 1.35) / 1000.0, 1)
+        drive_min = max(2, math.ceil(drive_km / 35.0 * 60))
+
+        tags = [p.get("district", "雲林")]
+        matched = p.get("matched_tags", {})
+        if matched.get("amenity"): tags.append(matched["amenity"])
+        if matched.get("bench") == "yes": tags.append("有長椅")
+
+        candidates.append({
+            "id": p.get("osm_id", str(idx + 1)),
+            "name": p.get("name", "推薦休息點"),
+            "tags": tags,
+            "drive_distance_desc": f"行駛距離 {drive_km} 公里",
+            "drive_eta_desc": f"行駛時間約 {drive_min} 分鐘",
+            "latitude": p.get("latitude"),
+            "longitude": p.get("longitude"),
+            "address": p.get("address", "")
+        })
+    return candidates
+
+async def trigger_cloud_enhancement(task_id: str, base_version: int, candidates: List[Dict[str, Any]]):
+    """雲端非同步增強 (斷網自動跳過，不卡住本地操作)"""
+    try:
+        async with httpx.AsyncClient(timeout=6.0) as client:
+            res = await client.post(
+                f"{CLOUD_API_URL}/api/cloud_compare",
+                json={"task_id": task_id, "base_version": base_version, "candidates": candidates}
+            )
+            if res.status_code == 200:
+                cloud_data = res.json()
+                comp_text = cloud_data.get("comparison_text", "")
+                await apply_cloud_comparison({
+                    "task_id": task_id,
+                    "base_version": base_version,
+                    "comparison_text": comp_text
+                })
+    except Exception:
+        # 完全離線時正常略過，維持本地 AI 結果
+        pass
+
+@app.post("/api/audio")
+async def handle_audio_pipeline(
+    file: UploadFile = File(...),
+    task_id: str = Form("demo_task_001"),
+    latitude: Optional[float] = Form(23.71),
+    longitude: Optional[float] = Form(120.54)
+):
+    """
+    接收音訊 -> 送 BC 本地搜尋 -> 立即推播本地真地點 -> 非同步嘗試雲端
+    """
+    audio_bytes = await file.read()
+    candidates = []
+
+    try:
+        async with httpx.AsyncClient(timeout=45.0) as client:
+            files = {"file": (file.filename, audio_bytes, file.content_type or "audio/m4a")}
+            data = {"language": "zh", "latitude": latitude, "longitude": longitude, "limit": 5}
+            bc_res = await client.post(f"{BC_API_URL}/api/audio", files=files, data=data)
+            if bc_res.status_code == 200:
+                bc_data = bc_res.json()
+                places = bc_data.get("places", [])
+                candidates = convert_bc_places_to_candidates(places)
+    except Exception as e:
+        print(f"呼叫 BC 失敗，使用本地預設: {e}")
+
+    # 更新任務候選地點並廣播
+    if candidates:
+        task = StateManager.update_task_state(task_id, new_candidates=candidates)
+    else:
+        task = StateManager.get_or_create_task(task_id)
+
     ui_json = UIGenerator.build_ui_json(task)
     await manager.broadcast(ui_json)
+
+    # 嘗試連網強化 (離線自動略過)
+    asyncio.create_task(trigger_cloud_enhancement(task_id, task["version"], task["candidates"]))
+
+    return {"status": "ok", "task_id": task_id, "version": task["version"], "count": len(task["candidates"])}
+
+@app.post("/api/intent")
+@app.post("/internal/apply_bc_filters")
+async def handle_intent_and_filters(req: Dict[str, Any]):
+    task_id = req.get("task_id", "demo_task_001")
+    # 若直接傳入 BC 的 places 清單
+    if "places" in req:
+        candidates = convert_bc_places_to_candidates(req["places"])
+        task = StateManager.update_task_state(task_id, new_candidates=candidates)
+    else:
+        filters = req.get("filters", {})
+        task = StateManager.update_task_state(task_id, new_filters=filters)
+
+    ui_json = UIGenerator.build_ui_json(task)
+    await manager.broadcast(ui_json)
+
+    asyncio.create_task(trigger_cloud_enhancement(task_id, task["version"], task["candidates"]))
     return {"status": "ok", "version": task["version"]}
 
 @app.post("/internal/apply_cloud_comparison")
