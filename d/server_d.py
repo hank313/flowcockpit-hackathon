@@ -23,49 +23,20 @@ CLOUD_API_URL = os.getenv("CLOUD_API_URL", "http://127.0.0.1:8002")
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-
-    # 示範/預設地點表 (離線備用)
-    cursor.execute("""
-    CREATE TABLE IF NOT EXISTS pois (
-        id INTEGER PRIMARY KEY,
-        name TEXT NOT NULL,
-        is_indoor INTEGER NOT NULL,
-        has_seating INTEGER NOT NULL,
-        drive_km REAL NOT NULL,
-        drive_minutes INTEGER NOT NULL,
-        tags TEXT NOT NULL
-    )
-    """)
-
-    # 任務狀態表 (新增動態地點快取動態支援)
+    # 只保留任務狀態表，地點完全交由 BC 模組提供
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS task_states (
         task_id TEXT PRIMARY KEY,
         version INTEGER NOT NULL,
         filters_json TEXT NOT NULL,
-        candidates_json TEXT NOT NULL,     -- 完整儲存當前候選清單物件
-        selected_id TEXT,                  -- 支援數字 ID 或 BC 的 osm_id (字串)
+        candidates_json TEXT NOT NULL,
+        selected_id TEXT,
         comparison_text TEXT,
         status TEXT NOT NULL,
         updated_at REAL NOT NULL
     )
     """)
-
-    cursor.execute("SELECT COUNT(*) FROM pois")
-    if cursor.fetchone()[0] == 0:
-        sample_pois = [
-            (1, "星巴克 國道門市", 1, 1, 2.5, 4, "室內,空調,咖啡,有插座"),
-            (2, "全家便利商店 休息站店", 1, 1, 1.2, 2, "室內,便利店,輕食,有座位"),
-            (3, "林間步道觀景涼亭", 0, 1, 6.8, 11, "戶外,通風,風景好,有長椅"),
-            (4, "國道服務區 主建築美食街", 1, 1, 3.0, 5, "室內,熱食,座位多,洗手間"),
-            (5, "得來速 快速取餐點", 0, 0, 2.0, 3, "免下車,快速,外帶"),
-            (6, "露天景觀咖啡座", 0, 1, 7.5, 12, "戶外遮陽,有座位,氣氛佳"),
-            (7, "綠能生態停車休憩區", 0, 0, 1.0, 2, "戶外,停車方便,活動筋骨"),
-            (8, "24H 自助圖書休息站", 1, 1, 4.5, 7, "室內安靜,冷氣,閱讀區,充電")
-        ]
-        cursor.executemany("INSERT INTO pois VALUES (?, ?, ?, ?, ?, ?, ?)", sample_pois)
-        conn.commit()
-
+    conn.commit()
     conn.close()
 
 init_db()
