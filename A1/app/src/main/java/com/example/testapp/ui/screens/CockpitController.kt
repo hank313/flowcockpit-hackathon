@@ -47,7 +47,8 @@ class CockpitController(
         gateway.stopVoiceInput()
         processingTimeout?.cancel()
         processingTimeout = scope.launch {
-            delay(10_000)
+            // D 轉 BC 的逾時是 30 秒,首次辨識還要載入模型,不能比它短
+            delay(30_000)
             micState = MicState.Idle
         }
     }
