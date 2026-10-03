@@ -1,0 +1,216 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+  <meta charset="UTF-8">
+  <title>FlowCockpit - D模組 後端與狀態控制台</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+    body { background-color: #0f172a; color: #f8fafc; display: flex; height: 100vh; overflow: hidden; }
+    
+    /* 左側：模擬車機螢幕 (16:9 風格) */
+    .cockpit-screen { flex: 1.2; padding: 24px; display: flex; flex-direction: column; border-right: 2px solid #334155; }
+    .screen-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; }
+    .status-badge { background-color: #059669; color: white; padding: 4px 10px; border-radius: 9999px; font-size: 12px; }
+    .version-badge { background-color: #3b82f6; color: white; padding: 4px 10px; border-radius: 9999px; font-size: 12px; }
+    
+    .screen-body { flex: 1; background-color: #1e293b; border-radius: 12px; padding: 20px; overflow-y: auto; border: 1px solid #475569; }
+    .filter-bar { display: flex; gap: 10px; margin-bottom: 20px; flex-wrap: wrap; }
+    .chip { background: #334155; padding: 8px 14px; border-radius: 8px; font-size: 14px; cursor: pointer; user-select: none; border: 1px solid transparent; }
+    .chip.active { background: #0284c7; border-color: #38bdf8; font-weight: bold; }
+
+    .card-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 14px; }
+    .card { background: #0f172a; border: 1px solid #334155; border-radius: 10px; padding: 14px; cursor: pointer; transition: 0.2s; position: relative; }
+    .card:hover { border-color: #64748b; }
+    .card.selected { border-color: #10b981; background: #064e3b33; }
+    .card-title { font-size: 16px; font-weight: bold; margin-bottom: 6px; color: #f1f5f9; }
+    .tags { display: flex; gap: 4px; flex-wrap: wrap; margin-bottom: 8px; }
+    .tag { font-size: 11px; background: #334155; padding: 2px 6px; border-radius: 4px; color: #94a3b8; }
+    .distance { font-size: 12px; color: #38bdf8; }
+
+    .cloud-box { margin-top: 20px; background: #451a03; border: 1px solid #d97706; padding: 14px; border-radius: 8px; font-size: 13px; line-height: 1.5; color: #fde68a; }
+
+    /* 右側：測試與監控面板 */
+    .control-panel { flex: 0.8; padding: 24px; display: flex; flex-direction: column; gap: 16px; background: #090d16; overflow-y: auto; }
+    .panel-box { background: #1e293b; border-radius: 8px; padding: 16px; border: 1px solid #334155; }
+    .panel-box h3 { font-size: 14px; margin-bottom: 10px; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.05em; }
+    .btn-group { display: flex; gap: 8px; flex-wrap: wrap; }
+    button { background: #2563eb; color: white; border: none; padding: 8px 12px; border-radius: 6px; cursor: pointer; font-size: 13px; }
+    button:hover { background: #1d4ed8; }
+    button.btn-warning { background: #d97706; }
+    button.btn-warning:hover { background: #b45309; }
+    
+    pre { background: #020617; padding: 10px; border-radius: 6px; font-size: 11px; color: #a5f3fc; overflow: auto; max-height: 250px; }
+  </style>
+</head>
+<body>
+
+  <!-- 模擬車機螢幕渲染 -->
+  <div class="cockpit-screen">
+    <div class="screen-header">
+      <h2>FlowCockpit HMI (Compose 視覺化預覽)</h2>
+      <div style="display: flex; gap: 8px;">
+        <span class="status-badge" id="ws-status">連線中...</span>
+        <span class="version-badge" id="state-version">Ver: -</span>
+      </div>
+    </div>
+
+    <div class="screen-body">
+      <div class="filter-bar" id="filters-container">
+        <!-- 動態渲染條件 -->
+      </div>
+      <div class="card-list" id="candidates-container">
+        <!-- 動態渲染卡片 -->
+      </div>
+      <div id="cloud-container"></div>
+    </div>
+  </div>
+
+  <!-- 模擬控制台 (供向隊友 Demo 使用) -->
+  <div class="control-panel">
+    <div class="panel-box">
+      <h3>模擬 BC 語音條件抽取注入 (/internal/apply_bc_filters)</h3>
+      <div class="btn-group">
+        <button onclick="injectBC({'indoor': true, 'seating': true})">「找室內有座位的」</button>
+        <button onclick="injectBC({'indoor': false, 'seating': true})">「想要室外看風景」</button>
+        <button onclick="injectBC({'max_walk_min': 3})">「走路 3 分鐘內」</button>
+        <button onclick="injectBC({'indoor': true, 'seating': true, 'max_walk_min': 10})">重置預設條件</button>
+      </div>
+    </div>
+
+    <div class="panel-box">
+      <h3>模擬 E 雲端模型注入 (/internal/apply_cloud_comparison)</h3>
+      <div class="btn-group">
+        <button class="btn-warning" onclick="injectCloud('Claude 雲端建議：若追求快速安靜請選全家，若想用餐休息推薦美食街。')">
+          注入雲端決策說明
+        </button>
+      </div>
+    </div>
+
+    <div class="panel-box" style="flex: 1; display: flex; flex-direction: column;">
+      <h3>即時 UI JSON 輸出 (D 模組送往 Android 的 payload)</h3>
+      <pre id="raw-json">等待資料中...</pre>
+    </div>
+  </div>
+
+  <script>
+    let ws;
+    let currentVersion = 1;
+    let currentFilters = {};
+
+    function connectWS() {
+      ws = new WebSocket("ws://" + window.location.host + "/ws");
+      const statusBadge = document.getElementById("ws-status");
+
+      ws.onopen = () => {
+        statusBadge.textContent = "WebSocket 已連線";
+        statusBadge.style.backgroundColor = "#059669";
+      };
+
+      ws.onmessage = (event) => {
+        const data = JSON.parse(event.data);
+        renderCockpit(data);
+      };
+
+      ws.onclose = () => {
+        statusBadge.textContent = "已中斷連線";
+        statusBadge.style.backgroundColor = "#dc2626";
+        setTimeout(connectWS, 2000);
+      };
+    }
+
+    function renderCockpit(packet) {
+      currentVersion = packet.version;
+      document.getElementById("state-version").textContent = `Task: ${packet.task_id} (v${packet.version})`;
+      document.getElementById("raw-json").textContent = JSON.stringify(packet, null, 2);
+
+      const payload = packet.payload;
+      const components = payload.components || [];
+
+      // 1. 渲染條件控制
+      const filterComp = components.find(c => c.component === "filter_controls");
+      const filterBar = document.getElementById("filters-container");
+      filterBar.innerHTML = "";
+      if (filterComp) {
+        filterComp.data.filters.forEach(f => {
+          const chip = document.createElement("div");
+          chip.className = `chip ${f.value === true ? 'active' : ''}`;
+          chip.textContent = `${f.label}: ${f.value}`;
+          chip.onclick = () => {
+            // 觸控切換條件
+            if (f.id === 'indoor' || f.id === 'seating') {
+              sendTouchAction("UPDATE_FILTER", { filters: { [f.id]: !f.value } });
+            }
+          };
+          filterBar.appendChild(chip);
+        });
+      }
+
+      // 2. 渲染候選清單
+      const listComp = components.find(c => c.component === "candidate_list");
+      const cardList = document.getElementById("candidates-container");
+      cardList.innerHTML = "";
+      if (listComp) {
+        const selectedId = listComp.data.selected_id;
+        listComp.data.items.forEach(item => {
+          const card = document.createElement("div");
+          card.className = `card ${item.id === selectedId ? 'selected' : ''}`;
+          card.innerHTML = `
+            <div class="card-title">${item.name} ${item.id === selectedId ? '✓' : ''}</div>
+            <div class="tags">${item.tags.map(t => `<span class="tag">${t}</span>`).join('')}</div>
+            <div class="distance">${item.distance_desc} ｜ ${item.eta_desc}</div>
+          `;
+          card.onclick = () => {
+            sendTouchAction("SELECT_CANDIDATE", { candidate_id: item.id });
+          };
+          cardList.appendChild(card);
+        });
+      }
+
+      // 3. 渲染雲端決策卡片
+      const compComp = components.find(c => c.component === "comparison_panel");
+      const cloudBox = document.getElementById("cloud-container");
+      if (compComp && compComp.data.cloud_enhanced_text) {
+        cloudBox.innerHTML = `<div class="cloud-box">✨ <strong>雲端決策取捨分析:</strong><br>${compComp.data.cloud_enhanced_text}</div>`;
+      } else {
+        cloudBox.innerHTML = "";
+      }
+    }
+
+    // 發送 Android 觸控事件
+    function sendTouchAction(action, payload) {
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({
+          task_id: "demo_task_001",
+          version: currentVersion,
+          type: "TOUCH_ACTION",
+          payload: { action, ...payload }
+        }));
+      }
+    }
+
+    // 模擬 BC 發起 HTTP POST
+    async function injectBC(filters) {
+      await fetch("/internal/apply_bc_filters", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ task_id: "demo_task_001", filters })
+      });
+    }
+
+    // 模擬 E 發起 HTTP POST
+    async function injectCloud(text) {
+      await fetch("/internal/apply_cloud_comparison", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          task_id: "demo_task_001",
+          base_version: currentVersion,
+          comparison_text: text
+        })
+      });
+    }
+
+    connectWS();
+  </script>
+</body>
+</html>

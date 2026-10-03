@@ -1,0 +1,41 @@
+# Secrets
+.env
+.env.*
+!.env.example
+*.key
+secrets.json
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Generated databases, maps, and model weights
+*.db
+*.sqlite
+*.sqlite3
+*.osm.pbf
+*.gguf
+*.bin
+*.onnx
+*.safetensors
+models/
+bc/data/
+bc/models/
+
+# Android generated/local files
+**/.gradle/
+**/.idea/
+**/.kotlin/
+**/build/
+**/local.properties
+*.iml
+*.apk
+
+# Temporary files
+tmp/
+*.log
+.DS_Store
+Thumbs.db

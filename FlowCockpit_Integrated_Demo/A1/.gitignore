@@ -1,0 +1,47 @@
+# 環境變數與金鑰(絕對不要commit)
+.env
+.env.*
+!.env.example
+*.key
+secrets.json
+
+# Python
+__pycache__/
+*.pyc
+venv/
+.venv/
+
+# Android
+*.iml
+.gradle/
+/local.properties
+/.idea/
+/build/
+/captures/
+.externalNativeBuild/
+.cxx/
+*.apk
+
+# 本地模型檔案(太大不適合放git)
+*.gguf
+*.bin
+models/
+
+# OS
+.DS_Store
+Thumbs.db
+*.iml
+.gradle
+/local.properties
+/.idea/caches
+/.idea/libraries
+/.idea/modules.xml
+/.idea/workspace.xml
+/.idea/navEditor.xml
+/.idea/assetWizardSettings.xml
+.DS_Store
+/build
+/captures
+.externalNativeBuild
+.cxx
+local.properties

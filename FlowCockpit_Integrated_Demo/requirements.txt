@@ -1,0 +1,3 @@
+-r bc/requirements.txt
+-r d/requirements.txt
+-r e/requirements.txt

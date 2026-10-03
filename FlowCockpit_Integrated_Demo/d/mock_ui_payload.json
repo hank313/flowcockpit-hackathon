@@ -1,0 +1,101 @@
+{
+  "task_id": "demo_task_001",
+  "version": 1,
+  "type": "UI_UPDATE",
+  "timestamp": 1727835200,
+  "payload": {
+    "layout": "VERTICAL",
+    "components": [
+      {
+        "component": "filter_controls",
+        "data": {
+          "filters": [
+            {
+              "id": "indoor",
+              "label": "室內空間",
+              "value": true,
+              "type": "TOGGLE"
+            },
+            {
+              "id": "seating",
+              "label": "有座位",
+              "value": true,
+              "type": "TOGGLE"
+            },
+            {
+              "id": "max_drive_min",
+              "label": "車程範圍",
+              "value": "<= 10 分鐘",
+              "type": "STEPPER"
+            }
+          ]
+        }
+      },
+      {
+        "component": "candidate_list",
+        "data": {
+          "selected_id": 2,
+          "items": [
+            {
+              "id": 1,
+              "name": "星巴克 國道門市",
+              "tags": [
+                "室內",
+                "空調",
+                "咖啡",
+                "有插座"
+              ],
+              "drive_distance_desc": "行駛距離 2.5 公里",
+              "drive_eta_desc": "行駛時間約 4 分鐘"
+            },
+            {
+              "id": 2,
+              "name": "全家便利商店 休息站店",
+              "tags": [
+                "室內",
+                "便利店",
+                "輕食",
+                "有座位"
+              ],
+              "drive_distance_desc": "行駛距離 1.2 公里",
+              "drive_eta_desc": "行駛時間約 2 分鐘"
+            },
+            {
+              "id": 4,
+              "name": "國道服務區 主建築美食街",
+              "tags": [
+                "室內",
+                "熱食",
+                "座位多",
+                "洗手間"
+              ],
+              "drive_distance_desc": "行駛距離 3.0 公里",
+              "drive_eta_desc": "行駛時間約 5 分鐘"
+            },
+            {
+              "id": 8,
+              "name": "24H 自助圖書休息站",
+              "tags": [
+                "室內安靜",
+                "冷氣",
+                "閱讀區",
+                "充電"
+              ],
+              "drive_distance_desc": "行駛距離 4.5 公里",
+              "drive_eta_desc": "行駛時間約 7 分鐘"
+            }
+          ]
+        }
+      },
+      {
+        "component": "comparison_panel",
+        "data": {
+          "visible": true,
+          "status": "IN_PROGRESS",
+          "selected_id": 2,
+          "cloud_enhanced_text": "Claude 雲端建議：若行程緊湊追求快速補給，推薦【全家便利商店 休息站店】（車程僅2分鐘）；若需要完整正餐或多樣飲食選擇，建議前往【國道服務區 主建築美食街】。"
+        }
+      }
+    ]
+  }
+}
