@@ -55,7 +55,6 @@ class HttpAiBox(
     @Volatile private var taskId = DEFAULT_TASK_ID
     @Volatile private var version = 1
     @Volatile private var gotLive = false
-    private var fallbackSent = false
 
     init {
         connect()
@@ -76,10 +75,6 @@ class HttpAiBox(
                 }
 
                 override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-                    if (!gotLive && !fallbackSent) {
-                        fallbackSent = true
-                        emitFallback()
-                    }
                     reconnect()
                 }
 
@@ -97,7 +92,7 @@ class HttpAiBox(
         }
     }
 
-    /** 先讀 App 上次存的 d_output.json,沒有才讀 assets 內建的 */
+    /** 離線備援:先讀 App 上次存的 d_output.json,沒有才讀 assets 內建的 */
     private fun emitFallback() {
         val text = runCatching {
             if (dOutput.exists()) dOutput.readText()
@@ -119,11 +114,13 @@ class HttpAiBox(
                     .addFormDataPart("task_id", taskId)
                     .build()
                 // 畫面由 WebSocket 推回來,這裡只負責送出
-                runCatching {
+                val sent = runCatching {
                     httpClient.newCall(
                         Request.Builder().url("http://$host/api/audio").post(body).build(),
                     ).execute().close()
                 }
+                // 連不上 D 且從未收過即時資料:錄音送出後改顯示離線備援(d_output.json)
+                if (sent.isFailure && !gotLive) emitFallback()
             }
         }
     }

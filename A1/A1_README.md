@@ -1,6 +1,6 @@
 # A1 端:目前進度與尚未解決事項
 
-> 更新日期:2026-10-03 ｜ 對應完整送件截止:2026/10/7(三)12:00
+> 更新日期:2026-10-03(已對照 D 的 commit `219b1ae`,並含本機對 D 與 BC 的修改) ｜ 對應完整送件截止:2026/10/7(三)12:00
 > 測試環境:Android Studio 模擬器(Pixel Tablet)+ 同一台電腦上的 D(`:8000`)與 BC(`:8001`)
 
 本文件整理 **A1/A2 這一端已打通的範圍**,以及**還沒解決、需要各模組對齊或補實作的事項**。每一項都標明「建議負責人」與「驗證程度」:
@@ -14,16 +14,19 @@
 
 ```
 按住麥克風 → App 錄 wav(16kHz/單聲道)→ POST D /api/audio
-  → D 轉給 BC /api/intent(faster-whisper + Ollama llama3.2:1b)
-  → D 更新任務狀態(version +1)→ WebSocket 推 UI JSON → App 收到並另存 d_output.json
+  → D 轉給 BC /api/intent(faster-whisper + Ollama llama3.2:1b)取得意圖與條件
+  → D 向 BC /api/text 查「實際地點」(BC 本機 OSM 資料庫,30 萬筆)
+  → D 更新任務狀態(version +1)→ WebSocket 推 UI JSON → App 渲染,並另存 d_output.json
 ```
 
 | 環節 | 狀態 |
 | --- | --- |
 | 模擬器錄音、取得 wav | 已實測 |
-| App 自動上傳給 D | 已實測(D log 出現 `POST /api/audio 200 OK`) |
-| D → BC 辨識(中文) | 已實測。「幫我找一個有室內空間的地方」辨識正確,條件抽成 `indoor: true` |
-| D 推播 → App 收到 | 已實測。模擬器 `files/d_output.json` 內含 D 推播的 JSON 與 `raw_text` |
+| App 自動上傳給 D | 已實測 |
+| D → BC 辨識(中文) | 已實測。「幫我找一個有室內空間的地方」辨識正確,條件抽成 `indoor: true`。BC 辨識約 1.4 秒(RTX 5070 Ti 筆電) |
+| **BC 地圖資料庫** | **已建立**:`bc/data/taiwan.sqlite3`,304,219 筆地點、22 縣市、368 鄉鎮,OSM 快照 2026-10-02 |
+| **候選為實際地點** | **已實測**:語音「請幫我找一個可以休息的地方」與「幫我找一個有室內空間的地方」,D 都推出 5 筆實際地點(摩爾花園、全家便利商店、一品鍋、桃花源餐廳斗六總店、斗六市未命名公園),不含任何示範資料。整段約 4–6 秒 |
+| D 推播 → App 收到 | 已實測(模擬器 `files/d_output.json` 內含 D 推播的 JSON) |
 | 連不上 D 時讀 `d_output.json` 當備援 | 已寫,**尚未測試** |
 
 **這次 A1 端新增/修改的檔案**
@@ -31,128 +34,156 @@
 | 檔案 | 內容 |
 | --- | --- |
 | `app/.../data/WavRecorder.kt`(新) | 按住期間錄音,放開後存成 `cache/voice.wav` |
-| `app/.../data/HttpAiBox.kt`(新) | 上傳錄音、連 WebSocket、另存 `d_output.json`、離線備援 |
+| `app/.../data/HttpAiBox.kt`(新) | 上傳錄音、連 WebSocket、另存 `d_output.json`;離線備援改為「錄音送不出去且從未連上 D」時才顯示 |
 | `app/.../MainActivity.kt` | 啟動時要麥克風權限;改用 `HttpAiBox`,位址 `10.0.2.2:8000` |
 | `AndroidManifest.xml` | `RECORD_AUDIO`、`INTERNET`、`usesCleartextTraffic` |
-| `CockpitController.kt` | 處理中逾時 10 秒 → 30 秒 |
+| `CockpitController.kt` | 處理中逾時 10 秒 → 30 秒;**錄音送出並收到結果後才顯示 AI 建議面板**(啟動、收合、確認之後 D 推來的狀態只記錄版本,不顯示) |
 | `libs.versions.toml`、`app/build.gradle.kts` | 加入 OkHttp 4.12.0 |
 
 `AssetJsonAiBox`、`FakeAiBox` 仍保留,沒有刪除;要回到假資料開發時,把 `MainActivity` 的 gateway 換回去即可。
 
 ---
 
-## 二、尚未解決事項
+## 二、本機對 D 與 BC 的修改(尚未 commit,請 D、BC 負責人審閱)
+
+**D(`d/server_d.py`)**:目標是「只用實際地點,不用示範地點」。
+
+| 改動 | 說明 |
+| --- | --- |
+| 移除 `FALLBACK_PLACES` | 寫死的 3 筆店家整個刪除。新任務與 `RESET_TASK` 的初始候選為空(App 會顯示既有的「沒有符合條件的地點」提示) |
+| 新增 `fetch_real_places` | 向 BC `/api/text` 查地點。**BC 的「休息設施」類別(長椅、野餐桌、車站月台)在 OSM 很稀疏**:雲科大預設座標 3 公里內為 0 筆(最近的是 3.4 公里外的斗六火車站月台)。所以「找休息地點」改查休息設施、咖啡店、便利商店、公園、餐廳五類,依距離合併取前 5 筆 |
+| 觸發規則 | 意圖是 `search_rest_stop`,**或語音含條件**(BC 遇到條件不回地點,交給 D 篩選)→ 查上述五類。其他找地點的語音(例如「找加油站」)→ 照使用者說的話查 |
+| 搜尋半徑 | 取自 `max_drive_distance_m` 條件(預設 3000 公尺;語音說「500 公尺內」會覆蓋)。BC 的距離是**直線距離** |
+| 保留原候選的情況 | BC 辨識出錯(沒有意圖資料)、語音不是找地點(`chat`、`clarify`)、BC 地點查詢連不上 |
+| 查不到時 | 候選清單設為空,原因記在資料庫的 `error_message`(**目前不會送給 App**,見 #5) |
+| 其他 | 重新搜尋後清除舊選取;查地點逾時 5 秒 → 15 秒 |
+| **候選池與條件篩選** | 每次語音搜尋把查到的地點(五類各最多 20 筆,合併後依距離排序)存成**候選池**,畫面顯示的是池中符合目前條件的前 5 筆。App 按「室內／有座位／有餐飲」開關或 1／3／5／10 km 按鈕(`UPDATE_FILTER`)時,**從候選池重新篩選(即時)**;只有距離放寬到超出候選池的半徑時,才用同樣的搜尋方式重新查詢(約 3 秒)。已選地點若被篩掉會清除選取 |
+| 開關語意 | 室內/有座位/有餐飲:**開 = 只顯示有該屬性的地點,關 = 只顯示沒有該屬性的地點**(例如關閉「室內」只顯示室外)。語音說「室外」(BC 回 `indoor: false`)也一樣只找室外地點。**預設三個開關都是開**(`DEFAULT_FILTERS`;「有餐飲」原本預設是關,在這個語意下預設會變成「只找沒有餐飲的地點」而查不到東西,所以改成開) |
+| 屬性推測 | OSM 沒有可靠的室內/座位欄位,D 依類別推測:**餐廳、咖啡店 = 室內、有座位、有餐飲**;**便利商店 = 室內、有餐飲、座位視為沒有**(座位不明);**長椅、野餐桌、有標座位數的地點 = 有座位**;公園 = 戶外、沒有座位(除非標了長椅) |
+| 限制 | 候選池只存在記憶體,D 重啟後遺失(此時只能再篩選畫面上現有的候選,補不回已被篩掉的)。**預設(三個開關都開)只會看到餐廳/咖啡店**;要看便利商店需關閉「有座位」,要看公園需關閉「室內」「有座位」「有餐飲」三個。**只關閉「室內」會得到 0 筆**(室外且有座位且有餐飲的地點不存在),畫面會顯示「沒有符合條件的地點」 |
+
+已實測(D 直接測,以及在模擬器的 App 上實際點擊):
+- 預設(三個開關都開):5 筆都是室內、有座位、有餐飲的餐廳。
+- **取消「有座位」→ 只剩沒有座位的(5 間全家便利商店)**;再選回 → 又只剩有座位的。
+- **取消「室內」「有座位」「有餐飲」→ 只剩室外、無座位、無餐飲的地點(5 個公園)**。在模擬器的 App 上實際連點三個開關也驗證通過。
+- 取消「室內」但「有座位」「有餐飲」仍開 → 0 筆;室內開、有座位關、有餐飲開 → 便利商店,加上距離 1 km → 0 筆(最近的全家 1038 m)。
+- 距離按鈕:1 km → 剩 917 m 那 1 筆(App 上實際點「1 km」,一品鍋 1.4 km 等超出範圍的地點消失),0.5 km → 0 筆,放寬到 10 km → 重新查詢補回。
+- 其他:不限半徑、半徑 0.3 公里(查不到)、指定類別(加油站 3 筆、咖啡店 0 筆)、BC 無法連線(保留原候選)皆符合預期。
+
+**App(A1 端)**:`CockpitController` 新增 `awaitingResult`,按住麥克風放開時設為 true,收合面板、按確認時設為 false;收到 D 的訊息時仍記錄 `taskId`、`version`,但 `awaitingResult` 為 false 就不更新畫面。已在模擬器實測:剛啟動沒有面板;閒置時 D 推播了 5 筆候選,面板**仍沒有出現**;按住麥克風、放開、收到結果後面板才出現。
+
+**BC(`bc/build_places.py`)**:在 `target.replace(DB_PATH)` 前加上 `db.close()`。原因是 `with sqlite3.connect() as db` 只提交、不關閉連線,Linux 可以替換仍開啟的檔案,**Windows 不行**(`WinError 32`),導致建庫在最後一步失敗。Linux 上行為不變。
+
+---
+
+## 三、尚未解決事項
 
 優先順序依「是否擋住決賽 Demo 五步驟」排列。Demo 步驟:① 新輸入 ② 改選擇 ③ 斷網 ④ 恢復連網 ⑤ 完成確認。
 
+**自上一版審查後已解決**:候選改為實際地點(本機修改,見上節)、條件欄位統一為 `indoor`/`has_seating`/`max_drive_distance_m`(D `219b1ae`,與 BC 一致)、`CONFIRM_DESTINATION` 會記錄所選候選(D `219b1ae`)、`UPDATE_FILTER` 與 `RESET_TASK` 已實作(D)、BC 出錯時不再重置候選(本機修改)、**行駛距離與「室內/有座位/有餐飲」開關都會篩選候選,開 = 只顯示有、關 = 只顯示沒有(本機修改)**、**餐廳、咖啡店不再被標成「沒有座位」(本機修改)**、**AI 建議面板只在錄音送出並收到結果後才顯示(本機修改)**。
+
 | # | 事項 | 擋住的步驟 | 建議負責 | 驗證程度 |
 | --- | --- | --- | --- | --- |
-| 1 | 候選清單是空的 | ①②④ | D(+BC) | 已實測 |
-| 2 | 條件欄位名稱與單位不一致 | ①②③ | D、BC | 依程式碼推斷 |
-| 3 | 「留下第二個」類語音無法運作 | ② | D、BC | 依程式碼推斷 |
-| 4 | D 沒有處理 `UPDATE_FILTER` | ②③ | D | 依程式碼推斷 |
-| 5 | 雲端 E 服務不存在 | ④ | E | 已實測 |
-| 6 | 確認後面板重新彈出、無「開新任務」 | ⑤ | D、A2 | 依程式碼推斷 |
-| 7 | BC 的錯誤被 D 靜默忽略 | ①② | D | 依程式碼推斷 |
+| 1 | 「室內/有座位/有餐飲」是依類別推測的,不是真實資料 | ①②③ | D | 已實測 |
+| 2 | 「留下第二個」類語音無法運作 | ② | D、BC | 部分實測 |
+| 3 | App 沒用 `RESET_TASK`(面板彈回的問題已由新的顯示規則擋住) | ⑤ | A2、D | 依程式碼推斷 |
+| 4 | 雲端 E 完全沒接上(**暫緩,目前不需要**) | ④ | E、D | 已實測 |
+| 5 | 辨識文字與錯誤訊息沒有送到 App | ①② | D、A1 | 已實測 |
+| 6 | 距離標示與「不用開太遠」的坑 | ① | D、A1 | 部分實測 |
+| 7 | 候選資料品質(未命名地點、類別不精準) | ① | D | 已實測 |
 
-### 1. 候選清單是空的(最優先)
+### 1. 「室內/有座位/有餐飲」是依類別推測的,不是真實資料
 
-**現象**:語音辨識成功後,App 面板有條件開關,但 `candidate_list.items` 永遠是 `[]`。
+開關與距離按鈕現在都會篩選候選(見第二節)。但**篩選依據的屬性不是真實資料**:OSM 沒有可靠的「室內」「有座位」欄位,BC 自己也說這兩項「尚未由此服務驗證」,D 只能依類別推測。實際會碰到的誤差:
 
-**原因**
-- D 轉給 BC 的是 `/api/intent`,README 明說它「不查地圖」,只回 `intent`、`conditions`、`raw_text`。
-- D 的候選只來自雲端 E(`:8002/api/cloud_search_places`),該服務不存在(見 #5)。
-- D 已移除內建示範地點,資料庫只存狀態,`candidates_json` 初始即為空陣列。
-
-**建議做法(D)**:改呼叫 BC 的 `/api/audio`(同樣回傳 `bc_to_d`,另多 `places`),再把 `places` 轉成 App 認得的格式:
-
-| BC `places` 欄位 | D → App `candidate_list.items` 欄位 |
+| 情況 | 說明 |
 | --- | --- |
-| `osm_id`(如 `node/2428293148`) | `id` |
-| `name` | `name` |
-| `categories`(英文代碼 `rest`、`cafe`…) | `tags`(建議轉成中文) |
-| `distance_m` | `drive_distance_desc`(例:「直線距離 0.3 公里」) |
-| 無 | `drive_eta_desc`(缺少時 App 會略過,不會壞) |
+| 便利商店被視為「沒有座位」 | 台灣不少便利商店有內用座位,但 OSM 沒標,D 無從得知,所以預設(有座位開)下**看不到便利商店** |
+| 公園被視為「戶外、沒有座位」 | 公園多半有長椅,但只有 OSM 標了 `bench=yes` 才算有座位 |
+| 餐廳、咖啡店一律視為「室內、有座位」 | 若是純外帶的店(例如攤販、飲料店)會判斷錯 |
 
-**注意事項**
-- BC 的距離是**直線距離**,沒有行駛時間,不要在 UI 宣稱是行車距離。
-- 「修改」類語音(如「留下第二個」)BC 回傳 `places: []`,D 應**保留原候選**,不要用空清單覆蓋。
-- D 目前沒有傳 `radius_km`、`limit` 給 BC,BC 在沒有半徑時的搜尋範圍**需要確認**。
-- 查地點需要 BC 的地圖資料庫 `bc/data/taiwan.sqlite3`,**目前沒有建**。作法見 `bc/README.md`「準備本機地圖資料」(下載 Geofabrik 的 Taiwan `.osm.pbf` 再執行 `build_places.py`,需 `requirements-data.txt`)。在會攔截 HTTPS 的網路下,請用 `curl.exe` 下載(見附錄)。
-- App 端**不用改**:字串 id、缺漏欄位現有解析器都能處理。
+**畫面上沒有標示這些屬性是推測的**,使用者會以為是確認過的資料。若 Demo 要讓條件完全可信,需要有這些屬性的資料(例如自建示範地點),或在畫面標示「推測」。
 
-### 2. 條件欄位名稱與單位不一致
+### 2. 「留下第二個」類語音無法運作
 
-| 意思 | BC 輸出 | D 的 UI 讀取 |
-| --- | --- | --- |
-| 室內 | `indoor` | `indoor`(一致) |
-| 有座位 | `has_seating` | `seating` |
-| 行駛範圍 | `max_drive_distance_m`(**公尺**) | `max_drive_min`(**分鐘**) |
+| 操作 | 結果 |
+| --- | --- |
+| 模擬 BC 回傳目標(`type=modify`、`target_candidate_id`) | 候選從多筆剩 1 筆,`selected_id` 設為該筆(已實測) |
+| 實際語音「留下第二個」,BC 沒有候選上下文 | BC 回 HTTP **422** `clarification_needed`:「請由 D 傳入上一輪依顯示順序排列的 candidate_ids」(已實測) |
 
-D 會把 BC 的條件併入 `filters_json`,但 `UIGenerator` 只讀上表右欄三個鍵,所以語音說的「有座位」、「500 公尺內」不會反映到畫面。單位也不同,不能直接對應,需要約定換算或統一欄位。
+D 目前**沒有**把 `context_json`(候選 id 清單、`reference_type`)帶給 BC,所以真實語音一定走到 422。本機修改後 D 遇到 BC 出錯會**保留原候選**(不再重置),但「留下第二個」仍然做不到。另外 Demo 步驟 ② 是「留下第二個,**其他換成較近的**」,目前只做到「只留 1 筆」。
 
-另外 D 的預設條件是 `indoor: true`、`seating: true`,語音說「有室內空間」時畫面看起來沒變化,**無法判斷條件有沒有套用**。驗證時請說會改變預設的句子,例如「找室外的地方」。
+D 在 BC 出錯時,資料庫的 `raw_text` 會變成預設值「找休息處」(使用者沒說過這句),`error_message` 只有「BC 端錯誤: HTTP 422」,BC 給的澄清問句被丟掉。
 
-> 專案規範文件(`FlowCockpit_專案現況與分工.md`)定案的 BC → D 欄位是 `indoor`、`has_seating`、`max_walk_distance_m`,與 BC、D 現況都不完全相同,請 D、BC 一起決定以哪一份為準。
+**建議(D)**:轉發給 BC 時帶 `context_json`(依顯示順序的 `candidate_ids` 與 `reference_type`);BC 回 422 時,把 `error.message` 填進 UI JSON 的 `payload.clarification_needed`。A1 的澄清 UI 已寫好,D 的 `build_ui_json` 有輸出這個欄位,但**目前沒有任何地方會設值**。
 
-### 3. 「留下第二個」類語音無法運作
+### 3. App 沒用 `RESET_TASK`
 
-BC 要解析「第二個」,需要上位機在 `context_json` 提供上一輪**依顯示順序排列的 `candidate_ids`** 與 `reference_type`,否則回 HTTP 422 `clarification_needed`(`bc/bc_intent.py` 的 `extract`)。目前 App 與 D 都**沒有**送這些資料(D 的 `/api/audio` 只轉發 `type`、`target_candidate_id`)。
+- 原本的問題:App 按確認時會先清空面板,接著 D 對 `CONFIRM_DESTINATION` 廣播新的 UI,App 會再次彈出面板。**新的顯示規則(錄音送出並收到結果後才顯示)已擋住這個情況**:按確認時 `awaitingResult` 設為 false,D 回推的狀態只記錄版本、不更新畫面(依程式碼推斷,尚未實測確認流程)。
+- D 的 `RESET_TASK` 實測可用(版本號遞增、候選與條件還原),但 **App 沒有對應的 `UserAction`,從不送它**。目前重新 Demo 要靠測試腳本送 `RESET_TASK`,或刪除 `d/flowcockpit.db` 後重啟 D。
 
-**建議做法(D)**:轉發給 BC 時,從目前任務狀態帶入 `context_json`(候選 id 清單、`reference_type`)。
+**建議**:A2 在 `UserAction` 加 `ResetTask` 並於確認後送出。
 
-### 4. D 沒有處理 `UPDATE_FILTER`
+### 4. 雲端 E 完全沒接上(暫緩,目前不需要)
 
-D 的 `README.md` 有寫,但 `server_d.py` 的 WebSocket 只處理 `SELECT_CANDIDATE`、`CONFIRM_DESTINATION`、`SYNC_REQUEST`;其他動作只會把目前狀態再廣播一次。App 的條件開關(`UserAction.UpdateCondition`)送出 `UPDATE_FILTER` 後**不會有任何效果**。
+> 已決定先不做雲端 E,以下僅供之後接手時參考。
 
-### 5. 雲端 E 服務不存在
+- D 最新版**沒有任何呼叫 E 的程式**(`CLOUD_API_URL` 有定義但沒被使用)。`comparison_text` 欄位永遠是空的,比較面板的雲端取捨文字從未產生過,Demo 步驟 ④ 做不出來。
+- E 目前只有函式 `get_comparison(candidates, conditions)`(`e/cloud_enhance.py`),**不是 HTTP 服務**,`e/` 內沒有任何端點。它拿**已有的候選**請 Claude 寫比較文字,不找地點;傳入空清單直接回 `None`。
+- E 讀候選的 `attributes` 欄位(`candidate_id`、`name`、`attributes`),D 的候選是 `{id, name, indoor, has_seating, ...}`,**欄位對不上**,需要轉換。
+- BC 是純本機離線,**不使用雲端**。候選一律由 BC 的本機資料庫提供,E 只負責比較文字,這符合企劃書 Stage 9,也讓斷網時(步驟 ③)核心操作仍可用。
+- E 需要 `.env` 內的 Claude API Key,以及 `anthropic`、`python-dotenv` 套件。
 
-D 會呼叫 `http://127.0.0.1:8002/api/cloud_search_places`,但 `e/` 內沒有這個端點(`cloud_enhance.py`、`integrate_ui.py`、`task_version_guard.py`、`test_claude_api.py` 皆非服務)。D 的 log 每次都會出現「雲端 AI 呼叫略過」。因此 `comparison_panel` 的雲端取捨文字**從未產生過**,Demo 步驟 ④ 目前做不出來。
+### 5. 辨識文字與錯誤訊息沒有送到 App
 
-D 已有 `POST /internal/apply_cloud_comparison`(含過期版本丟棄),E 可直接呼叫它,不一定要走 D 主動呼叫 E 的方向,請 D、E 決定。
+D 最新版的 UI JSON **只有** `components` 與 `clarification_needed`,**不再包含 `raw_text` 與 `error_message`**,兩者只存在資料庫。所以 App 畫面看不到「你說了什麼」,查不到地點時也只能顯示 App 內建的「沒有符合條件的地點」,看不到具體原因(例如「直線距離 3 公里內找不到休息地點」)。
 
-### 6. 確認後面板重新彈出、無「開新任務」
+**建議**:D 在 UI JSON 加回 `raw_text`、`error_message`(位置自訂,與 A1 約定);A1 在 `AiPanel` 顯示辨識文字,並解析 `error_message`。
 
-- App 按確認時,`CockpitController.onAction` 會先把 `ui` 設為 `null` 並重設 `taskId`、`version`,接著 D 對 `CONFIRM_DESTINATION` 一定會廣播一份 `CONFIRMED` 的 UI,App 會因為 `taskId` 已清空而**接受它,面板再次彈出**。
-- D 沒有「開新任務」機制:確認後仍是同一個 `task_id`,狀態一直是 `CONFIRMED`。
-- 若 App 改用新的 `task_id` 上傳,`update_task_state` 在資料列不存在時會直接 `return get_or_create_task(...)`,**第一次語音的條件會被丟掉**。
+### 6. 距離標示與「不用開太遠」的坑
 
-**建議**:D 在確認後不廣播(或廣播時 App 忽略 `status = CONFIRMED`),並提供新任務流程;A2 端配合調整 `HttpAiBox` 的 task_id 管理。目前重新 Demo 的土法是刪除 `d/flowcockpit.db` 後重啟 D。
+- **App 卡片寫「行駛 917 m」,但這是直線距離。** BC 的 `distance_m` 是直線距離(BC 明說不是行駛路程);D 把它原樣放進 `drive_distance_m`,App 的 `Attributes.kt` 把這個欄位顯示成「行駛 …」。D 另外算的 `drive_time_min`(距離 × 1.35 ÷ 時速 35 公里)**沒有送給 App**。建議改標「直線距離」,或與 D 約定欄位。
+- **「不用開太遠」會讓搜尋範圍縮到 300 公尺。** BC 把「不用開太遠、不要開太遠、少開一點、開近一點」轉成 `max_drive_distance_m`,預設值 **300 公尺**(`short_drive_distance_m`),D 沒有傳自訂值,所以半徑變成 0.3 公里,附近多半查不到。建議 D 轉發時帶 `context_json` 設 `short_drive_distance_m`(例如 3000)。「不用走太遠」(用「走」不是「開」)BC 不會轉成距離條件,不受影響。
+- `or 1500` 問題:D 轉換時 `distance_m` 缺少或剛好是 0 會被當成 1500 公尺。有座標時 BC 一定回距離,實際影響很小。
 
-### 7. BC 的錯誤被 D 靜默忽略
+### 7. 候選資料品質
 
-`server_d.py` 的 `/api/audio` 只在 BC 回 200 時才採用結果,其他情況(例如 `no_speech` 未辨識到語音、`clarification_needed`、連不上)都會變成空的 `bc_intent_data`,D 不更新任何內容也不通知 App。
-
-**後果**:使用者說錯話或沒說話時,App 停在「AI 處理中」直到 30 秒逾時才恢復。
-
-**建議(D)**:BC 回 `clarification_needed` 時,在 UI JSON 的 `payload.clarification_needed` 填入問句。A1 的澄清 UI 已經寫好,但 D 的 `build_ui_json` **完全沒有輸出這個欄位**。
+| 項目 | 說明 |
+| --- | --- |
+| 未命名地點 | OSM 沒有名稱的地點,BC 用泛稱(如「斗六市未命名公園」)當名稱並標 `name_is_label`,D 沒處理,可能出現多張看不出差別的卡片 |
+| 類別不精準 | 為了湊到 5 筆,D 會合併休息設施、咖啡店、便利商店、公園、餐廳,而不是只有使用者說的類別 |
+| 資料不即時 | OSM 離線快照(2026-10-02),無法確認營業時間與是否有空位(BC 回應已註明) |
 
 ---
 
-## 三、A1/A2 自己的待辦
+## 四、A1/A2 自己的待辦
 
 | 事項 | 說明 |
 | --- | --- |
-| 顯示辨識文字 | D 已送 `raw_text`(在 `filter_controls.data` 內),`UiJsonParser` 沒有讀取,畫面看不到「你說了什麼」。建議在 `AiPanel` 頂端顯示 |
+| 顯示辨識文字與錯誤 | 見 #5,需要 D 先送 |
+| 送出 `RESET_TASK` | 見 #3,`UserAction` 加 `ResetTask`,確認後送出 |
+| 距離標示 | 見 #6,「行駛」改「直線距離」或與 D 約定 |
 | 錄音/上傳失敗沒有回饋 | 沒有麥克風權限、錄音太短(< 0.3 秒)或上傳失敗時,`HttpAiBox` 靜默返回,麥克風狀態停在「處理中」直到逾時。建議立即回到 Idle 並提示 |
-| 連線一建立面板就彈出 | D 在 WebSocket 連上時會推一次目前狀態,App 啟動就顯示 AI 面板。是否要等第一次語音再顯示,請 A1、A2 決定 |
-| 離線備援與版本號衝突 | 備援只在「連不上 D 且從未收過即時訊息」時送出。若備援 JSON 的 version 大於 D 之後的版本,`CockpitController` 會把 D 的新訊息當成舊版丟棄,需重啟 App。備援機制**尚未測試** |
+| 離線備援與版本號衝突 | 備援只在「按麥克風錄音送不出去,且從未收過 D 的即時訊息」時顯示(讀 `d_output.json`)。若備援 JSON 的 version 大於 D 之後的版本,`CockpitController` 會把 D 的新訊息當成舊版丟棄,需重啟 App。備援機制**尚未測試** |
+| 收到結果前的空窗 | 面板現在要等結果才出現。按下麥克風到收到結果約 4–6 秒,這段時間只有麥克風上的「AI 處理中」轉圈,可考慮加更明顯的等待提示 |
 | 後端位址寫死 | `MainActivity` 的 `AI_BOX_HOST = "10.0.2.2:8000"` 只適用模擬器。實機平板要改成 AI Box 的區網 IP,建議改成可設定 |
 | 明文連線設定 | `usesCleartextTraffic="true"` 是開發用寫法。送件前建議改為 `networkSecurityConfig` 只放行區網位址 |
-| 條件調整的語音驗證 | 尚未用「改變預設值」的語音(室外、10 分鐘內…)驗證條件是否真的生效,見 #2 |
+| 定位 | 目前座標是 D 寫死的預設值(`23.718645, 120.573271`)。實機要改成裝置定位,模擬器可在 Extended controls → Location 設定,再由 App 把座標一併上傳 |
 
 ---
 
-## 四、其他模組的小問題(順手修)
+## 五、其他模組的小問題(順手修)
 
 | 模組 | 問題 |
 | --- | --- |
-| D | 舊版 `flowcockpit.db` 的資料表欄位與新程式不符(缺 `candidates_json`),會讓 `/ws` 與 `/api/audio` 連續報 `IndexError`。`CREATE TABLE IF NOT EXISTS` 不會升級舊表。本機已把舊檔改名為 `flowcockpit.old-schema.db` 處理。建議 D 加上欄位檢查或遷移 |
+| D | **每次改資料表欄位,舊的 `flowcockpit.db` 都會讓 D 直接壞掉。** 已發生三次(缺 `candidates_json`、缺 `error_message`、缺 `clarification_needed`),每次都是 `/api/audio` 回 HTTP 500。`CREATE TABLE IF NOT EXISTS` 不會升級舊表。拉到新版的人都要先刪除 `d/flowcockpit.db`;建議 D 加上欄位檢查或遷移。本機已把舊檔改名備份(`flowcockpit.old-schema*.db`,共三份,皆被 git 忽略,可直接刪除) |
 | D | `update_task_state` 發生例外時沒有關閉資料庫連線,檔案會一直被佔用,Windows 上無法改名或刪除 |
-| D | `d/README.md` 仍寫「內建 8 筆示範地點」與 `UPDATE_FILTER`,與現行程式不符 |
-| D | `d/requirements.txt` 原本缺 `httpx`、`python-multipart`,已補上 |
+| D | WebSocket 迴圈的 `except` 靜默吞掉所有例外,出錯時完全沒有 log,不易除錯 |
+| D | `d/README.md` 仍寫「內建 8 筆示範地點」、`/internal/apply_bc_filters`、`/internal/apply_cloud_comparison` 與舊的 UI 格式,與現行程式不符 |
+| D | 每次語音會呼叫 BC 多次(`/api/intent` 加查地點),各跑一次 Ollama。目前這台機器(RTX 5070 Ti 筆電)單次約 0.5–0.9 秒、整段約 4–6 秒,沒有問題;但在沒有 GPU 的 AI Box 上**需要重測**,D 的逾時是意圖 25 秒、地點 15 秒 |
 | BC | `app.py` 載入 Whisper 失敗時,真正的錯誤被吞掉,只回「無法載入 Whisper」。建議記錄原始例外,否則難以診斷(見附錄的憑證問題) |
 | BC | `run.sh` 只能用 Bash,Windows 需手動啟動(見附錄) |
+| BC | `build_places.py` 在 Windows 建庫失敗,已在本機修正(見第二節) |
 
 ---
 
@@ -172,7 +203,7 @@ D 已有 `POST /internal/apply_cloud_comparison`(含過期版本丟棄),E 可直
    .\.venv\Scripts\python.exe app.py --serve                          # 127.0.0.1:8001
    ```
 
-3. **D**(`d/`,**必須在 `d/` 目錄下執行**,資料庫用相對路徑):
+3. **D**(`d/`,**必須在 `d/` 目錄下執行**,資料庫用相對路徑;**拉到新版後先刪除舊的 `flowcockpit.db`**):
 
    ```powershell
    cd d
@@ -181,6 +212,19 @@ D 已有 `POST /internal/apply_cloud_comparison`(含過期版本丟棄),E 可直
    ```
 
 4. **App**:Android Studio 執行到 Pixel Tablet 模擬器。模擬器要開啟 **Extended controls → Microphone → Virtual microphone uses host audio input**,Windows「隱私權 → 麥克風」也要允許,否則錄到的是靜音。
+
+### 建立 BC 的地圖資料庫(實際地點的來源)
+
+沒有 `bc/data/taiwan.sqlite3` 時,BC 查地點會回 503 `places_unavailable`,D 就查不到任何地點。約 1–2 分鐘、下載 312 MB、產生 189 MB 的資料庫;`bc/data/` 已被 `.gitignore` 忽略。
+
+```powershell
+cd bc
+.\.venv\Scripts\python.exe -m pip install -r requirements-data.txt     # osmium、shapely
+curl.exe -fL --retry 5 -C - -o data\taiwan.osm.pbf https://download.geofabrik.de/asia/taiwan-latest.osm.pbf
+.\.venv\Scripts\python.exe build_places.py data\taiwan.osm.pbf --source-url https://download.geofabrik.de/asia/taiwan-latest.osm.pbf
+```
+
+建好後 BC 不需要重啟(每次查詢才開資料庫),可用 `curl.exe http://127.0.0.1:8001/api/places/info` 確認筆數。`build_places.py` 需要含 `db.close()` 修正才能在 Windows 完成(見第二節)。
 
 ### 若 Python 下載 Whisper 模型失敗(憑證錯誤)
 
@@ -199,9 +243,9 @@ foreach ($f in "config.json","tokenizer.json","vocabulary.txt","model.bin") {
 ### 手動測試(不經過 App)
 
 ```powershell
-# 只測 BC
+# 只測 BC 辨識
 curl.exe -sS -X POST http://127.0.0.1:8001/api/intent -F "file=@bc\examples\rest-stop.wav" -F "language=zh"
-# 測 D → BC 整條
+# 測 D → BC → 實際地點整條
 curl.exe -sS -X POST http://127.0.0.1:8000/api/audio -F "file=@bc\examples\rest-stop.wav" -F "task_id=demo_task_001"
 # 從模擬器取出 App 錄的音(PowerShell 的 > 會弄壞二進位,要用 Start-Process 導向)
 $adb = "$env:LOCALAPPDATA\Android\Sdk\platform-tools\adb.exe"
@@ -209,3 +253,5 @@ Start-Process $adb -ArgumentList "exec-out","run-as","com.example.testapp","cat"
 ```
 
 `bc/.gitignore` 已忽略 `*.wav`(僅 `examples/rest-stop.wav` 例外),自己的錄音不會被提交。**請勿覆蓋 `rest-stop.wav`**,它是 BC 共用的範例檔。
+
+> 以 WebSocket 測試 D(`UPDATE_FILTER`、`RESET_TASK`、`CONFIRM_DESTINATION`)時,訊息格式為 `{"task_id","version","type":"TOUCH_ACTION","payload":{"action":...}}`,連線位址 `ws://127.0.0.1:8000/ws`。測完建議送一次 `RESET_TASK` 還原狀態。

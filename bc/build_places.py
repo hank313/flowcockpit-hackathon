@@ -169,6 +169,7 @@ def build(pbf, source_url):
                     'coordinates':'WGS84; areas use an interior representative point, not an entrance'}
             db.execute('INSERT INTO metadata VALUES (?,?)',('snapshot',json.dumps(meta,ensure_ascii=False)))
             assert db.execute('PRAGMA integrity_check').fetchone()[0] == 'ok'
+        db.close()  # `with sqlite3.connect()` 只提交不關閉;Windows 不能替換仍開啟的檔案
         target.replace(DB_PATH)
     (DATA/'metadata.json').write_text(json.dumps(meta,ensure_ascii=False,indent=2),encoding='utf-8')
     features = [{'type':'Feature','properties':{'name':n,'osm_id':ident},'geometry':mapping(g)} for n,(g,ident) in counties.items()]

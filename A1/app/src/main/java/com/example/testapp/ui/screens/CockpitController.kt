@@ -33,6 +33,9 @@ class CockpitController(
     private var version = -1
     private var processingTimeout: Job? = null
 
+    /** 錄音送出之後才顯示 AI 建議;啟動、收合、確認之後 D 推來的狀態只記錄版本,不顯示 */
+    private var awaitingResult = false
+
     init {
         scope.launch { gateway.messages.collect(::onMessage) }
     }
@@ -44,12 +47,15 @@ class CockpitController(
 
     fun onMicReleased() {
         micState = MicState.Processing
+        awaitingResult = true
         gateway.stopVoiceInput()
         processingTimeout?.cancel()
         processingTimeout = scope.launch {
             // D 轉 BC 的逾時是 30 秒,首次辨識還要載入模型,不能比它短
             delay(30_000)
             micState = MicState.Idle
+            // 逾時仍沒有結果就不再等待;面板已顯示時要繼續接收觸控操作的回應
+            if (ui == null) awaitingResult = false
         }
     }
 
@@ -60,6 +66,7 @@ class CockpitController(
                 ?.firstOrNull { it.candidateId == action.candidateId }
                 ?.name ?: action.candidateId
             ui = null
+            awaitingResult = false
             taskId = null
             version = -1
         }
@@ -68,6 +75,7 @@ class CockpitController(
 
     fun dismissPanel() {
         ui = null
+        awaitingResult = false
     }
 
     private fun onMessage(json: String) {
@@ -77,6 +85,7 @@ class CockpitController(
         if (envelope.taskId == taskId && envelope.version <= version) return
         taskId = envelope.taskId
         version = envelope.version
+        if (!awaitingResult) return
         ui = UiJsonParser.parseUiDescription(envelope.payload)
         processingTimeout?.cancel()
         if (micState == MicState.Processing) micState = MicState.Idle
